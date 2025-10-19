@@ -105,6 +105,7 @@ func (r *Receiver) handleMessage(header map[string]interface{}, payload []byte) 
 	var base BaseTransferMessage
 	headerBytes, _ := json.Marshal(header)
 	json.Unmarshal(headerBytes, &base)
+	log.Println("[Receiver] Received Message From Sender")
 
 	switch base.Type {
 	case "FILE_METADATA":
@@ -141,6 +142,7 @@ func (r *Receiver) sendMetadataAck(fileID string, accepted bool, existingTransfe
 		Reason:           reason,
 	}
 	msgBytes, _ := framingprotocol.BuildFramedMessage(ack, nil)
+	log.Printf("[Receiver] Sending metadata ACK for fileID %s: accepted=%v, existingTransfer=%v", fileID, accepted, existingTransfer)
 	r.conn.Write(msgBytes)
 }
 

@@ -277,7 +277,10 @@ func (pc *PeerConnection) ConnectToPeer(peer peerdiscovery.DiscoveredPeer) error
 		return err
 	}
 
+	// Clear the deadline after the first read
+	conn.SetReadDeadline(time.Time{})
 	messages, err := parser.Feed(buf[:n])
+	log.Println("[Sender] Received Connection Response Message From Receiver")
 	if err != nil {
 		conn.Close()
 		return err

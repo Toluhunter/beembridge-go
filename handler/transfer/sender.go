@@ -132,6 +132,7 @@ func (s *Sender) listenForAcks() {
 		}
 
 		for _, msg := range messages {
+			log.Println("[Sender] Received Message From Receiver")
 			s.handleMessage(msg.Header)
 		}
 	}
