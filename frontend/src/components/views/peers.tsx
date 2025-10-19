@@ -1,0 +1,384 @@
+import { RiRadarFill } from "react-icons/ri";
+import { StartPeerDiscovery, StopPeerDiscovery, GetDiscoveredPeers, ConnectToPeer, RespondToPeerConnectionRequest } from "../../../wailsjs/go/main/App.js"
+import * as runtime from '../../../wailsjs/runtime/runtime.js';
+import {
+    useState,
+    useEffect,
+    useCallback
+} from "react";
+
+
+interface DiscoveryMessage {
+    appId: string;       // A unique ID for your application (e.g., "MyFileTransferApp_v1")
+    instanceId: string;  // A unique ID for this specific running instance
+    peerName: string;    // A user-friendly name for this peer (e.g., computer name or user-defined)
+    tcpPort: number;     // The TCP port this instance is listening on for file transfers
+    timestamp: number;   // To help detect stale messages
+}
+
+// Define the structure of a discovered peer for internal tracking
+export interface DiscoveredPeer extends DiscoveryMessage { // Exported for use in renderer process types
+    lastSeen: string; // Timestamp when the last beacon from this peer was received
+    ipAddress: string; // The IP address of the peer (from the UDP packet)
+}
+
+interface PeerViewProps {
+    connectedPeers: DiscoveredPeer[];
+    setConnectedPeers: React.Dispatch<React.SetStateAction<DiscoveredPeer[]>>;
+}
+export const PeerView: React.FC<PeerViewProps> = ({ connectedPeers, setConnectedPeers }) => {
+    // State to manage the list of discovered peers
+    const [discoveredPeers, setDiscoveredPeers] = useState<DiscoveredPeer[]>([]);
+    // State to manage the list of connected peers
+    // State to control the sonar animation and discovery mode
+    const [incomingRequest, setIncomingRequest] = useState<{ peer: DiscoveredPeer, requestId: string, accept: () => void, reject: () => void } | null>(null);
+    const [isDiscovering, setIsDiscovering] = useState(false);
+    const [connectingPeerId, setConnectingPeerId] = useState<string | null>(null);
+    const [isDiscoveryButtonDisabled, setIsDiscoveryButtonDisabled] = useState(false);
+
+    useEffect(() => {
+        let intervalId: NodeJS.Timeout | undefined;
+
+        if (isDiscovering) {
+            intervalId = setInterval(() => {
+                GetDiscoveredPeers().then(peers => {
+                    const filteredDiscoveries = peers.filter(
+                        newPeer => !connectedPeers.some(connectedPeer => connectedPeer.instanceId === newPeer.instanceId)
+                    );
+                    setDiscoveredPeers(filteredDiscoveries);
+                });
+            }, 2000); // Poll every 2 seconds
+        }
+
+        return () => {
+            if (intervalId) {
+                clearInterval(intervalId);
+            }
+        };
+    }, [isDiscovering, connectedPeers]);
+
+    const onConnectionResponse = useCallback((peer: DiscoveredPeer, status: string, reason?: string) => {
+        console.log(`[RECEIVER] Connection status with ${peer.peerName}: ${status}${reason ? ` (${reason})` : ''}`);
+        if (status === 'accepted') {
+            // Move peer from discovered to connected list
+            setConnectedPeers(prevConnected => {
+                // Prevent adding duplicates to connectedPeers
+                if (!prevConnected.some(p => p.instanceId === peer.instanceId)) {
+                    return [...prevConnected, peer];
+                }
+                return prevConnected;
+            });
+            // Remove peer from discovered list as it's now connected
+            setDiscoveredPeers(prevDiscovered => prevDiscovered.filter(p => p.instanceId !== peer.instanceId));
+            console.log("[RECEIVER] Connection ready! You can send data now.");
+        } else if (status === 'rejected' || status === 'failed' || status === 'timeout') {
+            console.log("[RECEIVER] Connection failed or rejected. Please try another peer.");
+            // If connection failed, ensure the peer is back in discovered if it was attempting to connect
+            setDiscoveredPeers(prevDiscovered => {
+                if (!prevDiscovered.some(p => p.instanceId === peer.instanceId)) {
+                    return [...prevDiscovered, peer];
+                }
+                return prevDiscovered;
+            });
+        }
+        setConnectingPeerId(null); // Always clear the connecting state after a response
+    }, [setConnectedPeers]);
+
+    useEffect(() => {
+        // Wails event listeners
+        const cleanupOnPeerConnectionRequest = runtime.EventsOn("onPeerConnectionRequest", (peer, requestId) => {
+            console.log(`[RECEIVER] Connection request from ${peer.peerName} (${requestId})`);
+            console.log(`[RECEIVER] Peer: ${JSON.stringify(peer)}`);
+            const accept = () => {
+                console.log(`[RECEIVER] Accepting connection request from ${peer.peerName}`);
+                RespondToPeerConnectionRequest(requestId, true);
+                setIncomingRequest(null);
+            };
+
+            const reject = (reason?: string) => {
+                console.log(`[RECEIVER] Rejecting connection request from ${peer.peerName}${reason ? `: ${reason}` : ''}`);
+                RespondToPeerConnectionRequest(requestId, false);
+                setIncomingRequest(null);
+            };
+            setIncomingRequest({ peer, requestId, accept, reject });
+        });
+
+        const cleanupOnConnectionResponse = runtime.EventsOn("onConnectionResponse", (peer, status, reason) => {
+            onConnectionResponse(peer, status, reason);
+            setConnectingPeerId(null);
+        });
+
+        const cleanupOnPeerConnected = runtime.EventsOn("onPeerConnected", (peer) => {
+            console.log(`[RECEIVER] Connection status with ${peer.peerName}: accepted`);
+            onConnectionResponse(peer, 'accepted');
+        });
+
+        // Check if the 'electron' API is available
+        // if (window.electron) {
+
+        //     // --- Listener for replies from Main Process ---
+        //     // This will update the discoveredPeers state when new peer information is received
+        //     const cleanup = window.electron.onPeerUpdate((_event, newDiscoveries) => {
+        //         const filteredDiscoveries = newDiscoveries.filter(
+        //             newPeer => !connectedPeers.some(connectedPeer => connectedPeer.instanceId === newPeer.instanceId)
+        //         );
+        //         setDiscoveredPeers(filteredDiscoveries);
+
+        //         // If new peers are found, and we were in discovery mode, stop the animation
+        //         if (newDiscoveries.length > 0 && isDiscovering) {
+        //             setIsDiscovering(false);
+        //         }
+        //     });
+
+        //     const cleanupConnectionResponse = window.electron.onConnectionResponse((_event, peer, status, reason) => {
+        //         onConnectionResponse(peer, status, reason);
+        //         setConnectingPeerId(null);
+        //     });
+
+        //     const cleanupPeerConnectionRequest = window.electron.onPeerConnectionRequest((_event, peer, requestId) => {
+        //         console.log(`[RECEIVER] Connection request from ${peer.peerName} (${requestId})`);
+        //         console.log(`[RECEIVER] Peer: ${JSON.stringify(peer)}`);
+        //         const accept = () => {
+        //             console.log(`[RECEIVER] Accepting connection request from ${peer.peerName}`);
+        //             window.electron.respondToPeerConnectionRequest(requestId, true);
+        //             setIncomingRequest(null);
+        //         };
+
+        //         const reject = (reason?: string) => {
+        //             console.log(`[RECEIVER] Rejecting connection request from ${peer.peerName}${reason ? `: ${reason}` : ''}`);
+        //             window.electron.respondToPeerConnectionRequest(requestId, false, reason);
+        //             setIncomingRequest(null);
+        //         };
+        //         setIncomingRequest({ peer, requestId, accept, reject });
+        //     });
+
+        //     // --- Fetch app version using invoke ---
+        //     // Cleanup function to remove the listener when component unmounts
+        //     return () => {
+        //         cleanup(); // Call the cleanup function returned by onReplyFromMain
+        //         cleanupConnectionResponse(); // Clean up connection response listener
+        //         cleanupPeerConnectionRequest();
+        //     };
+        // } else {
+        //     console.warn('Electron API is NOT available in the renderer. Are you running in Electron?');
+        // }
+
+        return () => {
+            if (cleanupOnPeerConnectionRequest) cleanupOnPeerConnectionRequest();
+            if (cleanupOnConnectionResponse) cleanupOnConnectionResponse();
+            if (cleanupOnPeerConnected) cleanupOnPeerConnected();
+        }
+    }, [onConnectionResponse]); // Add connectedPeers to dependencies for accurate filtering
+
+    /**
+     * Initiates the peer discovery process.
+     * Activates the sonar animation and calls the Electron API to start discovery.
+     * Sets a timeout to stop the animation after a few seconds if no peers are found,
+     * to prevent it from running indefinitely.
+     */
+    const startDiscovery = () => {
+        if (isDiscoveryButtonDisabled) {
+            return;
+        }
+        setIsDiscoveryButtonDisabled(true);
+        setTimeout(() => setIsDiscoveryButtonDisabled(false), 1200);
+
+        if (isDiscovering) {
+            StopPeerDiscovery();
+            setIsDiscovering(false);
+        } else {
+            StartPeerDiscovery();
+            setIsDiscovering(true);
+        }
+    };
+
+    /**
+     * Handles the action to connect to a discovered peer.
+     * Moves the peer from the discovered list to the connected list.
+     * @param peerToConnect The peer object to connect to.
+     */
+    const handleConnect = (peerToConnect: DiscoveredPeer) => {
+        setConnectingPeerId(peerToConnect.instanceId); // Set connecting state
+        console.log(`Attempting to connect to peer: ${peerToConnect.peerName} (${peerToConnect.instanceId})`);
+        ConnectToPeer(peerToConnect);
+    };
+
+    return (
+        <div className="flex flex-col h-full p-6 overflow-y-auto">
+            <div className="flex justify-between items-center mb-6">
+                <h1 className="text-4xl font-bold text-white">Peers</h1>
+                {incomingRequest && (
+                    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black bg-opacity-50">
+                        <div className="bg-gray-800 rounded-lg p-6 w-full max-w-md">
+                            <h2 className="text-2xl font-bold text-white mb-4">Incoming Connection Request</h2>
+                            <p className="text-gray-300 mb-4">
+                                {incomingRequest.peer.peerName} ({incomingRequest.peer.ipAddress}:{incomingRequest.peer.tcpPort}) wants to connect.
+                            </p>
+                            <div className="flex justify-end">
+                                <button
+                                    className="mr-2 px-4 py-2 rounded-lg bg-red-500 text-white hover:bg-red-700 focus:outline-none focus:ring-2 focus:ring-red-500 focus:ring-opacity-50"
+                                    onClick={() => {
+                                        if (incomingRequest) {
+                                            incomingRequest.reject();
+                                            setIncomingRequest(null);
+                                        }
+                                    }}
+                                >
+                                    Reject
+                                </button>
+                                <button
+                                    className="px-4 py-2 rounded-lg bg-green-500 text-white hover:bg-green-700 focus:outline-none focus:ring-2 focus:ring-green-500 focus:ring-opacity-50"
+                                    onClick={() => {
+                                        if (incomingRequest) {
+                                            incomingRequest.accept();
+                                            setConnectedPeers(prevConnected => {
+                                                // Prevent adding duplicates to connectedPeers
+                                                if (!prevConnected.some(p => p.instanceId === incomingRequest.peer.instanceId)) {
+                                                    return [...prevConnected, incomingRequest.peer];
+                                                }
+                                                return prevConnected;
+                                            });
+                                            setIncomingRequest(null);
+                                        }
+                                    }}
+                                >
+                                    Accept
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+                )}
+                {/* "Add Peer" button - Always visible now */}
+                <button className="modern-button text-white font-bold py-2 px-6 rounded-lg shadow-md">
+                    Add Peer
+                </button>
+            </div>
+
+            {/* Connected Peers Section */}
+            <div className="mb-8">
+                <h2 className="text-3xl font-semibold text-white mb-4">Connected Peers</h2>
+                {connectedPeers.length === 0 ? (
+                    <div className="bg-gray-800 rounded-2xl border border-gray-700 p-8 text-center shadow-lg">
+                        <p className="text-gray-400 text-lg">No peers currently connected.</p>
+                    </div>
+                ) : (
+                    <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+                        {connectedPeers.map((peer) => (
+                            <div key={peer.instanceId} className="bg-gray-800 rounded-xl p-5 border-2 border-green-500 shadow-lg flex flex-col items-start">
+                                <h3 className="text-xl font-semibold text-white mb-2">{peer.peerName} <span className="text-green-400 text-sm">(Connected)</span></h3>
+                                <p className="text-gray-400 text-sm mb-1">ID: {peer.instanceId}</p>
+                                <p className="text-gray-500 text-xs mt-auto pt-2">Last active: {new Date(peer.lastSeen).toLocaleTimeString()}</p>
+                                <p className="text-gray-500 text-xs pt-0.5">IP: {peer.ipAddress}</p>
+                                <p className="text-gray-500 text-xs pt-0.5">Port: {peer.tcpPort}</p>
+                            </div>
+                        ))}
+                    </div>
+                )}
+            </div>
+
+            {/* Discovered Peers Section */}
+            <div>
+                <h2 className="text-3xl font-semibold text-white mb-4">Discovered Peers</h2>
+                {discoveredPeers.length === 0 && !isDiscovering ? (
+                    <div className="flex flex-col items-center justify-center bg-gray-800 rounded-2xl border border-gray-700 p-8 text-center shadow-lg">
+                        <p className="text-gray-400 text-xl mb-8">
+                            No peers detected yet. Click the button to start finding others!
+                        </p>
+                        <div className={`relative w-48 h-48 mb-8 flex items-center justify-center transition-opacity duration-500 ${isDiscovering ? 'opacity-100' : 'opacity-0 pointer-events-none'}`}>
+                            <div className="absolute w-full h-full bg-blue-600 rounded-full opacity-30"></div>
+                            <div className={`absolute w-full h-full bg-blue-600 rounded-full opacity-0 ${isDiscovering ? 'sonar-pulse' : ''}`}>
+                            </div>
+                            <div className="absolute w-24 h-24 bg-blue-700 rounded-full flex items-center justify-center text-white text-3xl font-bold">
+                                📡
+                            </div>
+                        </div>
+                        <button
+                            className="modern-button text-white font-bold py-4 px-10 rounded-lg text-xl shadow-lg"
+                            onClick={startDiscovery}
+                            disabled={isDiscoveryButtonDisabled}
+                        >
+                            Find Peer
+                        </button>
+                    </div>
+                ) : (
+                    <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+                        {discoveredPeers.map((peer) => (
+                            <div
+                                key={peer.instanceId}
+                                className={`bg-gray-800 rounded-xl p-5 border border-gray-700 shadow-lg flex flex-col items-start
+                                    ${connectingPeerId === peer.instanceId ? 'connecting-animation' : ''}`}
+                            >
+                                <h3 className="text-xl font-semibold text-white mb-2">{peer.peerName}</h3>
+                                <p className="text-gray-400 text-sm mb-1">ID: {peer.instanceId}</p>
+                                <p className="text-gray-500 text-xs mt-auto pt-2">Last active: {new Date(peer.lastSeen).toLocaleTimeString()}</p>
+                                <p className="text-gray-500 text-xs pt-0.5">IP: {peer.ipAddress}</p>
+                                <p className="text-gray-500 text-xs pt-0.5">Port: {peer.tcpPort}</p>
+                                <button
+                                    className="modern-button mt-4 w-full py-2 px-4 text-white font-bold rounded-lg shadow-md"
+                                    onClick={() => handleConnect(peer)}
+                                    disabled={connectingPeerId === peer.instanceId} // Disable while connecting
+                                >
+                                    {connectingPeerId === peer.instanceId ? (
+                                        <span className="flex items-center justify-center">
+                                            <svg className="animate-spin -ml-1 mr-2 h-5 w-5 text-white" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                                                <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                                                <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                                            </svg>
+                                            Connecting...
+                                        </span>
+                                    ) : (
+                                        "Connect"
+                                    )}
+                                </button>
+                            </div>
+                        ))}
+                        {/* Show sonar animation if discovering and no peers are found yet in discovered list */}
+                        {isDiscovering && discoveredPeers.length === 0 && (
+                            <div className="flex flex-col items-center justify-center bg-gray-800 rounded-2xl border border-gray-700 p-8 text-center shadow-lg col-span-full">
+                                <p className="text-gray-400 text-xl mb-8">Searching for peers...</p>
+                                <div className={`relative w-48 h-48 mb-8 flex items-center justify-center transition-opacity duration-500 opacity-100`}>
+                                    <div className="absolute w-full h-full bg-blue-600 rounded-full opacity-30"></div>
+                                    <div className={`absolute w-full h-full bg-blue-600 rounded-full opacity-0 sonar-pulse`}></div>
+                                    <div className="absolute w-24 h-24 bg-blue-700 rounded-full flex items-center justify-center text-white text-3xl font-bold">
+                                        <RiRadarFill />
+                                    </div>
+                                </div>
+                                <button
+                                    className="modern-button text-white font-bold py-4 px-10 rounded-lg text-xl shadow-lg"
+                                    onClick={startDiscovery}
+                                    disabled={isDiscoveryButtonDisabled}
+                                >
+                                    Searching... (Click to Stop)
+                                </button>
+                            </div>
+                        )}
+                        {/* Button to start discovery when peers are present in the discovered list, but not currently discovering */}
+                        {discoveredPeers.length > 0 && !isDiscovering && (
+                            <div className="col-span-full flex justify-center mt-6">
+                                <button
+                                    className="modern-button text-white font-bold py-4 px-10 rounded-lg text-xl shadow-lg"
+                                    onClick={startDiscovery}
+                                    disabled={isDiscoveryButtonDisabled}
+                                >
+                                    Re-scan for Peers
+                                </button>
+                            </div>
+                        )}
+                        {/* Button to stop discovery when peers are present and we are still discovering */}
+                        {discoveredPeers.length > 0 && isDiscovering && (
+                            <div className="col-span-full flex justify-center mt-6">
+                                <button
+                                    className="modern-button text-white font-bold py-4 px-10 rounded-lg text-xl shadow-lg"
+                                    onClick={startDiscovery}
+                                    disabled={isDiscoveryButtonDisabled}
+                                >
+                                    Searching... (Click to Stop)
+                                </button>
+                            </div>
+                        )}
+                    </div>
+                )}
+            </div>
+        </div>
+    );
+};
