@@ -3,8 +3,6 @@
 import {peerdiscovery} from '../models';
 import {main} from '../models';
 
-export function CalculateFileHash(arg1:string):Promise<string>;
-
 export function ConnectToPeer(arg1:peerdiscovery.DiscoveredPeer):Promise<void>;
 
 export function GetConnectedPeers():Promise<Array<peerdiscovery.DiscoveredPeer>>;

@@ -18,13 +18,13 @@ type BaseTransferMessage struct {
 
 type FileMetadataMessage struct {
 	BaseTransferMessage
-	Prefix     string `json:"prefix,omitempty"`
-	ParentID   string `json:"parentId,omitempty"`
-	TotalItems int    `json:"totalItems,omitempty"`
-	FileName   string `json:"fileName"`
-	FileSize   int64  `json:"fileSize"`
-	TotalChunks int   `json:"totalChunks"`
-	ChunkSize  int    `json:"chunkSize"`
+	Prefix      string `json:"prefix,omitempty"`
+	ParentID    string `json:"parentId,omitempty"`
+	TotalItems  int    `json:"totalItems,omitempty"`
+	FileName    string `json:"fileName"`
+	FileSize    int64  `json:"fileSize"`
+	TotalChunks int    `json:"totalChunks"`
+	ChunkSize   int    `json:"chunkSize"`
 }
 
 type FileMetadataAckMessage struct {
@@ -75,28 +75,28 @@ type TransferErrorMessage struct {
 // --- State and Helper Structs ---
 
 type ChunkDebugInfo struct {
-	ChunkActualSize   int    `json:"chunkActualSize"`
+	ChunkActualSize     int    `json:"chunkActualSize"`
 	ChunkActualChecksum string `json:"chunkActualChecksum"`
-	ChunkFileName     string `json:"chunkFileName"`
+	ChunkFileName       string `json:"chunkFileName"`
 }
 
 type IncomingTransferState struct {
-	FileID            string
-	FileName          string
-	FileSize          int64
-	TotalChunks       int
-	ReceivedBytes     int64
-	ReceivedChunkMap  map[int]ChunkDebugInfo
-	ChunkStorageDir   string
-	MetadataFilePath  string
-	TimeoutTimer      *time.Timer
-	RemotePeer        peerdiscovery.DiscoveredPeer
-	OnProgress        TransferProgressCallback
-	OnComplete        TransferCompleteCallback
-	OnError           func(fileID string, message string)
+	FileID             string
+	FileName           string
+	FileSize           int64
+	TotalChunks        int
+	ReceivedBytes      int64
+	ReceivedChunkMap   map[int]ChunkDebugInfo
+	ChunkStorageDir    string
+	MetadataFilePath   string
+	TimeoutTimer       *time.Timer
+	RemotePeer         peerdiscovery.DiscoveredPeer
+	OnProgress         TransferProgressCallback
+	OnComplete         TransferCompleteCallback
+	OnError            func(fileID string, message string)
 	CurrentFrameParser *framingprotocol.FrameParser
-	ParentID          string
-	Prefix            string
+	ParentID           string
+	Prefix             string
 }
 
 type Progress struct {
@@ -121,3 +121,10 @@ type Result struct {
 // --- Callbacks ---
 type TransferProgressCallback func(progress Progress)
 type TransferCompleteCallback func(result Result)
+type TransferCallbacks struct {
+	OnProgress        TransferProgressCallback
+	OnComplete        TransferCompleteCallback
+	OnError           func(fileID string, message string)
+	OnHashingProgress func(progress map[string]interface{})
+	RequestAcceptance func(fileID, fileName string, fileSize int64, senderPeerName string, acceptCallback func(string))
+}

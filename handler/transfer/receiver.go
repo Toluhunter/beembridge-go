@@ -5,9 +5,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"io"
 	"log"
-	"net"
 	"os"
 	"path/filepath"
 	"sync"
@@ -30,11 +28,10 @@ type WriteJob struct {
 }
 
 // Receiver handles the receiving side of a file transfer.
-// It manages incoming file metadata, receives chunks, writes them to disk,
-// manages backpressure, and reconstructs the final file.
-
+// It is now driven by a ConnectionManager instead of having its own read loop.
 type Receiver struct {
-	conn              net.Conn
+	connManager       ConnectionManager
+	fileId            string
 	downloadDir       string
 	remotePeer        peerdiscovery.DiscoveredPeer
 	myInstanceID      string
@@ -47,12 +44,11 @@ type Receiver struct {
 
 	activeTransfers sync.Map // map[string]*IncomingTransferState
 	fileWriteQueues sync.Map // map[string]chan WriteJob
-	queueFullStates sync.Map // map[string]bool
-	memoryUsage     sync.Map // map[string]*int64
 }
 
 func NewReceiver(
-	conn net.Conn,
+	connManager ConnectionManager,
+	fileID string,
 	downloadDir string,
 	remotePeer peerdiscovery.DiscoveredPeer,
 	myInstanceID string,
@@ -62,9 +58,10 @@ func NewReceiver(
 	onError func(fileID string, message string),
 	onHashingProgress func(progress map[string]interface{}),
 	requestAcceptance func(fileID, fileName string, fileSize int64, senderPeerName string, acceptCallback func(string)),
-) *Receiver {
-	return &Receiver{
-		conn:              conn,
+) Receiver {
+	return Receiver{
+		connManager:       connManager,
+		fileId:            fileID,
 		downloadDir:       downloadDir,
 		remotePeer:        remotePeer,
 		myInstanceID:      myInstanceID,
@@ -77,35 +74,12 @@ func NewReceiver(
 	}
 }
 
-func (r *Receiver) Handle() {
-	frameParser := framingprotocol.NewFrameParser()
-	buffer := make([]byte, 2048)
-
-	for {
-		n, err := r.conn.Read(buffer)
-		if err != nil {
-			// Handle connection error
-			return
-		}
-
-		messages, err := frameParser.Feed(buffer[:n])
-		if err != nil {
-			log.Printf("[Receiver] Error parsing frame: %v", err)
-			frameParser.Reset()
-			continue
-		}
-
-		for _, msg := range messages {
-			r.handleMessage(msg.Header, msg.Payload)
-		}
-	}
-}
-
-func (r *Receiver) handleMessage(header map[string]interface{}, payload []byte) {
+// HandleMessage is the main entry point for the Receiver, called by the ConnectionManager dispatcher.
+func (r *Receiver) HandleMessage(header map[string]interface{}, payload []byte) {
 	var base BaseTransferMessage
 	headerBytes, _ := json.Marshal(header)
 	json.Unmarshal(headerBytes, &base)
-	log.Println("[Receiver] Received Message From Sender")
+	log.Printf("[Receiver] Received Message From Sender: %s", base.Type)
 
 	switch base.Type {
 	case "FILE_METADATA":
@@ -143,7 +117,7 @@ func (r *Receiver) sendMetadataAck(fileID string, accepted bool, existingTransfe
 	}
 	msgBytes, _ := framingprotocol.BuildFramedMessage(ack, nil)
 	log.Printf("[Receiver] Sending metadata ACK for fileID %s: accepted=%v, existingTransfer=%v", fileID, accepted, existingTransfer)
-	r.conn.Write(msgBytes)
+	r.connManager.Write(msgBytes)
 }
 
 func (r *Receiver) handleMetadata(metadata FileMetadataMessage) {
@@ -152,9 +126,9 @@ func (r *Receiver) handleMetadata(metadata FileMetadataMessage) {
 		return
 	}
 
-	log.Printf("[Receiver] Received metadata for file %s (%d bytes) from %s.", metadata.FileName, metadata.FileSize, r.remotePeer.PeerName)
+	log.Printf("[Receiver] Received metadata for file %s (%d bytes) from %s.", metadata.FileName, metadata.FileSize, metadata.SenderPeerName)
 
-	r.requestAcceptance(metadata.FileID, metadata.FileName, metadata.FileSize, r.remotePeer.PeerName, func(acceptedFileID string) {
+	r.requestAcceptance(metadata.FileID, metadata.FileName, metadata.FileSize, metadata.SenderPeerName, func(acceptedFileID string) {
 		chunkStorageDir := filepath.Join(r.downloadDir, acceptedFileID)
 		metadataFilePath := filepath.Join(chunkStorageDir, "metadata.json")
 		os.MkdirAll(chunkStorageDir, 0755)
@@ -184,7 +158,7 @@ func (r *Receiver) handleMetadata(metadata FileMetadataMessage) {
 		initialState.TimeoutTimer = time.AfterFunc(transferTimeout, func() {
 			log.Printf("[Receiver] Transfer %s timed out.", initialState.FileName)
 			initialState.OnComplete(Result{FileID: acceptedFileID, FileName: initialState.FileName, Status: "error", Message: "Transfer timeout"})
-			r.activeTransfers.Delete(acceptedFileID)
+			r.cleanupTransfer(initialState)
 		})
 	})
 }
@@ -211,7 +185,6 @@ func (r *Receiver) handleChunk(chunkMsg FileChunkMessage, payload []byte) {
 		return
 	}
 
-	// Handle backpressure
 	// TODO: Implement backpressure logic
 
 	// Add to write queue
@@ -282,7 +255,7 @@ func (r *Receiver) sendChunkAck(fileID string, chunkIndex int, success bool, rea
 		Reason:     reason,
 	}
 	msgBytes, _ := framingprotocol.BuildFramedMessage(ack, nil)
-	r.conn.Write(msgBytes)
+	r.connManager.Write(msgBytes)
 }
 
 func (r *Receiver) handleFileEnd(endMsg FileEndMessage) {
@@ -346,8 +319,7 @@ func (r *Receiver) reconstructFile(state *IncomingTransferState) {
 		outFile.Write(chunkBytes)
 	}
 
-	// Verify final checksum
-	// TODO: Implement file hashing and verification
+	// TODO: Verify final checksum
 
 	log.Printf("[Receiver] File %s reconstructed successfully to %s.", state.FileName, outputFilePath)
 	state.OnComplete(Result{
@@ -383,37 +355,17 @@ func (r *Receiver) cleanupTransfer(state *IncomingTransferState) {
 	}
 	r.activeTransfers.Delete(state.FileID)
 	os.RemoveAll(state.ChunkStorageDir)
+
+	// Deregister from the manager
+	r.connManager.DeregisterReceiver(state.FileID)
 }
 
-func calculateFileHash(filePath string, onProgress func(percentage int)) (string, error) {
-	file, err := os.Open(filePath)
-	if err != nil {
-		return "", err
-	}
-	defer file.Close()
-
-	fileInfo, _ := file.Stat()
-	fileSize := fileInfo.Size()
-	bytesRead := int64(0)
-
-	hash := md5.New()
-	buffer := make([]byte, 1024*1024)
-
-	for {
-		n, err := file.Read(buffer)
-		if err == io.EOF {
-			break
-		}
-		if err != nil {
-			return "", err
-		}
-		hash.Write(buffer[:n])
-		bytesRead += int64(n)
-		if onProgress != nil {
-			percentage := int(float64(bytesRead) / float64(fileSize) * 100)
-			onProgress(percentage)
-		}
-	}
-
-	return hex.EncodeToString(hash.Sum(nil)), nil
+func (r *Receiver) HandleConnectionError(err error) {
+	// When connection dies, notify all active incoming transfers
+	r.activeTransfers.Range(func(key, value interface{}) bool {
+		state := value.(*IncomingTransferState)
+		state.OnError(state.FileID, fmt.Sprintf("Connection error: %v", err))
+		r.cleanupTransfer(state)
+		return true
+	})
 }

@@ -5,8 +5,8 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
-	"net"
 	"os"
 	"path/filepath"
 	"sync"
@@ -22,20 +22,30 @@ const (
 	maxOutstandingChunks = 16
 )
 
+// ConnectionManager defines the interface needed by a Sender or Receiver
+// to interact with the underlying connection.
+type ConnectionManager interface {
+	Write(data []byte) (int, error)
+	RegisterSender(sender *Sender)
+	DeregisterSender(fileID string)
+	DeregisterReceiver(fileID string)
+}
+
 // Sender handles the sending side of a file transfer.
 // It manages file metadata exchange, chunking, sending, and error recovery.
 type Sender struct {
-	conn             net.Conn
-	filePath         string
-	fileId           string
-	senderInstanceId string
-	senderPeerName   string
-	onProgress       TransferProgressCallback
-	onComplete       TransferCompleteCallback
-	onError          func(fileID string, message string)
-	parentId         string
-	prefix           string
-	rootDir          string
+	connManager       ConnectionManager
+	filePath          string
+	fileId            string
+	senderInstanceId  string
+	senderPeerName    string
+	onProgress        TransferProgressCallback
+	onComplete        TransferCompleteCallback
+	onError           func(fileID string, message string)
+	onHashingProgress func(progress map[string]interface{})
+	parentId          string
+	prefix            string
+	rootDir           string
 
 	fileSize          int64
 	totalChunks       int
@@ -47,27 +57,27 @@ type Sender struct {
 }
 
 func NewSender(
-	conn net.Conn,
+	connManager ConnectionManager,
 	filePath string,
-	fileId string,
 	senderInstanceId string,
 	senderPeerName string,
 	onProgress TransferProgressCallback,
 	onComplete TransferCompleteCallback,
 	onError func(fileID string, message string),
+	onHashingProgress func(progress map[string]interface{}),
 	parentId string,
 	prefix string,
 	rootDir string,
-) *Sender {
-	return &Sender{
-		conn:              conn,
+) Sender {
+	return Sender{
+		connManager:       connManager,
 		filePath:          filePath,
-		fileId:            fileId,
 		senderInstanceId:  senderInstanceId,
 		senderPeerName:    senderPeerName,
 		onProgress:        onProgress,
 		onComplete:        onComplete,
 		onError:           onError,
+		onHashingProgress: onHashingProgress,
 		parentId:          parentId,
 		prefix:            prefix,
 		rootDir:           rootDir,
@@ -77,6 +87,31 @@ func NewSender(
 }
 
 func (s *Sender) Start() {
+	// Hashing file before transfer
+	s.onHashingProgress(map[string]interface{}{
+		"filePath":   s.filePath,
+		"percentage": 0,
+	})
+	fileId, err := calculateFileHash(s.filePath, func(percentage int) {
+		s.onHashingProgress(map[string]interface{}{
+			"filePath":   s.filePath,
+			"percentage": percentage,
+		})
+	})
+	if err != nil {
+		s.sendError(fmt.Sprintf("Failed to hash file: %v", err), nil)
+		s.onHashingProgress(map[string]interface{}{
+			"filePath":   s.filePath,
+			"percentage": 100, // Clear from UI
+		})
+		return
+	}
+	s.fileId = fileId
+	s.onHashingProgress(map[string]interface{}{
+		"filePath":   s.filePath,
+		"percentage": 100, // Clear from UI
+	})
+
 	stats, err := os.Stat(s.filePath)
 	if err != nil {
 		s.sendError(fmt.Sprintf("Failed to get file stats: %v", err), nil)
@@ -86,7 +121,9 @@ func (s *Sender) Start() {
 	s.fileSize = stats.Size()
 	s.totalChunks = int((s.fileSize + chunkSize - 1) / chunkSize)
 
-	go s.listenForAcks()
+	// Register self with the connection manager.
+	// The listener goroutine is no longer started here.
+	s.connManager.RegisterSender(s)
 
 	s.sendMetadata()
 }
@@ -110,39 +147,16 @@ func (s *Sender) sendMetadata() {
 
 	log.Printf("[Sender] Sending metadata for file %s...", metadata.FileName)
 	msgBytes, _ := framingprotocol.BuildFramedMessage(metadata, nil)
-	s.conn.Write(msgBytes)
+	s.connManager.Write(msgBytes)
 }
 
-func (s *Sender) listenForAcks() {
-	frameParser := framingprotocol.NewFrameParser()
-	buffer := make([]byte, 2048)
-
-	for {
-		n, err := s.conn.Read(buffer)
-		if err != nil {
-			s.sendError(fmt.Sprintf("Connection error: %v", err), nil)
-			return
-		}
-
-		messages, err := frameParser.Feed(buffer[:n])
-		if err != nil {
-			log.Printf("[Sender] Error parsing frame: %v", err)
-			frameParser.Reset()
-			continue
-		}
-
-		for _, msg := range messages {
-			log.Println("[Sender] Received Message From Receiver")
-			s.handleMessage(msg.Header)
-		}
-	}
-}
-
-func (s *Sender) handleMessage(header map[string]interface{}) {
+// HandleMessage is called by the central connection manager's reader loop.
+func (s *Sender) HandleMessage(header map[string]interface{}) {
 	var base BaseTransferMessage
 	headerBytes, _ := json.Marshal(header)
 	json.Unmarshal(headerBytes, &base)
 
+	// This check is still relevant in case of a logic error in the dispatcher
 	if base.FileID != s.fileId {
 		log.Printf("[Sender] Received message for unexpected fileId %s. Ignoring.", base.FileID)
 		return
@@ -168,6 +182,10 @@ func (s *Sender) handleMessage(header map[string]interface{}) {
 		s.mutex.Unlock()
 		log.Printf("[Sender] Receiver queue free. Resuming transfer.")
 		s.sendAvailableChunks()
+	case "TRANSFER_ERROR":
+		log.Printf("[Sender] Received error message from receiver: %v", header["message"])
+		s.onError(s.fileId, fmt.Sprintf("Receiver error: %v", header["message"]))
+		s.connManager.DeregisterSender(s.fileId)
 	}
 }
 
@@ -256,9 +274,11 @@ func (s *Sender) readAndSendChunk(chunkIndex int) {
 	}
 
 	msgBytes, _ := framingprotocol.BuildFramedMessage(chunkMessage, chunkData)
-	_, err = s.conn.Write(msgBytes)
+	_, err = s.connManager.Write(msgBytes)
 	if err != nil {
-		s.retryChunk(chunkIndex)
+		// The write error will be handled by the connection manager's reader loop
+		// which will terminate and call HandleConnectionError.
+		log.Printf("[Sender] Write error: %v. The connection may be closed.", err)
 	}
 
 	s.onProgress(Progress{
@@ -301,9 +321,12 @@ func (s *Sender) finalizeTransfer() {
 		Status: "completed",
 	}
 	msgBytes, _ := framingprotocol.BuildFramedMessage(finalMessage, nil)
-	s.conn.Write(msgBytes)
+	s.connManager.Write(msgBytes)
 
 	s.onComplete(Result{FileID: s.fileId, FileName: filepath.Base(s.filePath), Status: "completed"})
+
+	// Deregister self from the connection manager
+	s.connManager.DeregisterSender(s.fileId)
 }
 
 func (s *Sender) sendError(msg string, details interface{}) {
@@ -319,6 +342,47 @@ func (s *Sender) sendError(msg string, details interface{}) {
 		Details: details,
 	}
 	msgBytes, _ := framingprotocol.BuildFramedMessage(errorMessage, nil)
-	s.conn.Write(msgBytes)
+	s.connManager.Write(msgBytes)
 	s.onError(s.fileId, msg)
+}
+
+func (s *Sender) GetFileID() string {
+	return s.fileId
+}
+
+func (s *Sender) HandleConnectionError(err error) {
+	s.onError(s.fileId, fmt.Sprintf("Connection error: %v", err))
+}
+
+func calculateFileHash(filePath string, onProgress func(percentage int)) (string, error) {
+	file, err := os.Open(filePath)
+	if err != nil {
+		return "", err
+	}
+	defer file.Close()
+
+	fileInfo, _ := file.Stat()
+	fileSize := fileInfo.Size()
+	bytesRead := int64(0)
+
+	hash := md5.New()
+	buffer := make([]byte, 1024*1024)
+
+	for {
+		n, err := file.Read(buffer)
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return "", err
+		}
+		hash.Write(buffer[:n])
+		bytesRead += int64(n)
+		if onProgress != nil {
+			percentage := int(float64(bytesRead) / float64(fileSize) * 100)
+			onProgress(percentage)
+		}
+	}
+
+	return hex.EncodeToString(hash.Sum(nil)), nil
 }

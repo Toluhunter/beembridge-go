@@ -5,10 +5,7 @@ import (
 	"beembridge-go/handler/peerdiscovery"
 	"beembridge-go/handler/transfer"
 	"context"
-	"crypto/md5"
-	"encoding/hex"
 	"fmt"
-	"io"
 	"log"
 	"os"
 	"path/filepath"
@@ -57,7 +54,7 @@ func (a *App) startup(ctx context.Context) {
 	}
 
 	// --- Transfer Callbacks ---
-	transferCallbacks := &peerconnection.TransferCallbacks{
+	transferCallbacks := &transfer.TransferCallbacks{
 		OnProgress: func(progress transfer.Progress) {
 			runtime.EventsEmit(a.ctx, "onProgressUpdate", progress)
 		},
@@ -200,30 +197,10 @@ func (a *App) GetFileStats(paths []string) ([]SelectedItem, error) {
 	return items, nil
 }
 
-func (a *App) CalculateFileHash(filePath string) (string, error) {
-	file, err := os.Open(filePath)
-	if err != nil {
-		return "", err
-	}
-	defer file.Close()
-
-	hash := md5.New()
-	if _, err := io.Copy(hash, file); err != nil {
-		return "", err
-	}
-
-	return hex.EncodeToString(hash.Sum(nil)), nil
-}
-
 func (a *App) InitiateFileTransfer(peerID string, items []SelectedItem) {
 	for _, item := range items {
 		if !item.IsDirectory {
-			fileId, err := a.CalculateFileHash(item.Path)
-			if err != nil {
-				log.Printf("Error calculating hash for %s: %v", item.Name, err)
-				continue
-			}
-			err = a.peerConnection.InitiateFileTransfer(peerID, item.Path, fileId, "", "", "")
+			err := a.peerConnection.InitiateFileTransfer(peerID, item.Path, "", "", "")
 			if err != nil {
 				log.Printf("Error initiating transfer for %s: %v", item.Name, err)
 			}

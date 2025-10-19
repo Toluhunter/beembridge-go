@@ -43,18 +43,142 @@ type ConnectionRejectMessage struct {
 	Reason string `json:"reason"`
 }
 
-type MessageData struct {
-	BaseMessage
-	Content string `json:"content"`
+// ==== Central Connection Manager ====
+
+type ManagedConnection struct {
+	conn            net.Conn
+	parser          *framingprotocol.FrameParser
+	pc              *PeerConnection
+	peer            peerdiscovery.DiscoveredPeer
+	writeMutex      sync.Mutex
+	activeSenders   sync.Map // map[string]transfer.Sender
+	activeReceivers sync.Map // map[string]transfer.Receiver
 }
 
-// NEW: Callbacks for transfer logic
-type TransferCallbacks struct {
-	OnProgress        transfer.TransferProgressCallback
-	OnComplete        transfer.TransferCompleteCallback
-	OnError           func(fileID string, message string)
-	OnHashingProgress func(progress map[string]interface{})
-	RequestAcceptance func(fileID, fileName string, fileSize int64, senderPeerName string, acceptCallback func(string))
+func NewManagedConnection(conn net.Conn, pc *PeerConnection, peer peerdiscovery.DiscoveredPeer) *ManagedConnection {
+	return &ManagedConnection{
+		conn:   conn,
+		parser: framingprotocol.NewFrameParser(),
+		pc:     pc,
+		peer:   peer,
+	}
+}
+
+// run is the single, centralized reader loop for a connection.
+func (mc *ManagedConnection) run() {
+	defer mc.conn.Close()
+	defer mc.cleanup()
+
+	buffer := make([]byte, 4096)
+	for {
+		n, err := mc.conn.Read(buffer)
+		if err != nil {
+			log.Printf("[ManagedConnection] Read error on connection: %v. Terminating.", err)
+			return // This will trigger the deferred cleanup
+		}
+
+		messages, err := mc.parser.Feed(buffer[:n])
+		if err != nil {
+			log.Printf("[ManagedConnection] Frame parse error: %v", err)
+			mc.parser.Reset()
+			continue
+		}
+
+		for _, msg := range messages {
+			mc.dispatchMessage(msg)
+		}
+	}
+}
+
+func (mc *ManagedConnection) dispatchMessage(msg framingprotocol.FramedMessage) {
+	var base transfer.BaseTransferMessage
+	headerBytes, _ := json.Marshal(msg.Header)
+	json.Unmarshal(headerBytes, &base)
+
+	if base.FileID == "" {
+		log.Printf("[ManagedConnection] Received message with no FileID. Ignoring.")
+		return
+	}
+
+	// Route based on message type
+	switch base.Type {
+	case "FILE_METADATA":
+		// This is a new incoming file transfer. Create a receiver.
+		log.Printf("[ManagedConnection] Received metadata for new transfer %s. Creating receiver.", base.FileID)
+		receiver := transfer.NewReceiver(
+			mc, // Pass the connection manager
+			base.FileID,
+			mc.pc.downloadDir,
+			mc.peer,
+			mc.pc.instanceID,
+			mc.pc.peerName,
+			mc.pc.transferCallbacks.OnProgress,
+			mc.pc.transferCallbacks.OnComplete,
+			mc.pc.transferCallbacks.OnError,
+			mc.pc.transferCallbacks.OnHashingProgress,
+			mc.pc.transferCallbacks.RequestAcceptance,
+		)
+		// Store a pointer to the receiver to avoid copying sync.Map
+		mc.activeReceivers.Store(base.FileID, &receiver)
+		receiver.HandleMessage(msg.Header, msg.Payload)
+
+	case "FILE_CHUNK", "FILE_END":
+		// Route to an existing receiver
+		if r, ok := mc.activeReceivers.Load(base.FileID); ok {
+			// Assert as a pointer
+			r.(*transfer.Receiver).HandleMessage(msg.Header, msg.Payload)
+		} else {
+			log.Printf("[ManagedConnection] Received %s for unknown receiver %s. Ignoring.", base.Type, base.FileID)
+		}
+
+	case "FILE_METADATA_ACK", "FILE_CHUNK_ACK", "QUEUE_FULL", "QUEUE_FREE", "TRANSFER_ERROR":
+		// Route to an existing sender
+		if s, ok := mc.activeSenders.Load(base.FileID); ok {
+			// Assert as a pointer
+			s.(*transfer.Sender).HandleMessage(msg.Header)
+		} else {
+			log.Printf("[ManagedConnection] Received ACK/status for unknown sender %s. Ignoring.", base.FileID)
+		}
+
+	default:
+		log.Printf("[ManagedConnection] Received unhandled message type: %s", base.Type)
+	}
+}
+
+func (mc *ManagedConnection) cleanup() {
+	// Notify all active senders and receivers that the connection is dead
+	err := errors.New("connection closed")
+	mc.activeSenders.Range(func(key, value interface{}) bool {
+		// Assert as a pointer
+		value.(*transfer.Sender).HandleConnectionError(err)
+		return true
+	})
+	mc.activeReceivers.Range(func(key, value interface{}) bool {
+		// Assert as a pointer
+		value.(*transfer.Receiver).HandleConnectionError(err)
+		return true
+	})
+}
+
+// --- transfer.ConnectionManager implementation ---
+
+func (mc *ManagedConnection) Write(data []byte) (int, error) {
+	mc.writeMutex.Lock()
+	defer mc.writeMutex.Unlock()
+	return mc.conn.Write(data)
+}
+
+// RegisterSender now accepts a pointer to avoid copying the lock value.
+func (mc *ManagedConnection) RegisterSender(sender *transfer.Sender) {
+	mc.activeSenders.Store(sender.GetFileID(), sender)
+}
+
+func (mc *ManagedConnection) DeregisterSender(fileID string) {
+	mc.activeSenders.Delete(fileID)
+}
+
+func (mc *ManagedConnection) DeregisterReceiver(fileID string) {
+	mc.activeReceivers.Delete(fileID)
 }
 
 // ==== PeerConnection Struct ====
@@ -64,7 +188,7 @@ type PeerConnection struct {
 	peerName   string
 	tcpPort    int
 
-	activeConnections sync.Map // map[string]net.Conn
+	activeConnections sync.Map // map[string]*ManagedConnection
 
 	onConnectionRequest func(peer peerdiscovery.DiscoveredPeer, respond func(accept bool, reason string))
 	onPeerConnected     func(peer peerdiscovery.DiscoveredPeer)
@@ -72,12 +196,12 @@ type PeerConnection struct {
 
 	// NEW FIELDS
 	downloadDir       string
-	transferCallbacks *TransferCallbacks
+	transferCallbacks *transfer.TransferCallbacks
 }
 
 // ==== Constructor ====
 
-func NewPeerConnection(instanceID, peerName string, tcpPort int, downloadDir string, callbacks *TransferCallbacks) *PeerConnection {
+func NewPeerConnection(instanceID, peerName string, tcpPort int, downloadDir string, callbacks *transfer.TransferCallbacks) *PeerConnection {
 	return &PeerConnection{
 		instanceID:        instanceID,
 		peerName:          peerName,
@@ -102,24 +226,24 @@ func (pc *PeerConnection) OnConnectionStatus(callback func(peer peerdiscovery.Di
 }
 
 // NEW: Method to start a file transfer
-func (pc *PeerConnection) InitiateFileTransfer(peerID string, filePath string, fileId string, parentId string, prefix string, rootDir string) error {
+func (pc *PeerConnection) InitiateFileTransfer(peerID string, filePath string, parentId string, prefix string, rootDir string) error {
 	val, ok := pc.activeConnections.Load(peerID)
 	if !ok {
 		return fmt.Errorf("no active connection found for peer %s", peerID)
 	}
-	conn := val.(net.Conn)
+	mc := val.(*ManagedConnection)
 
-	log.Printf("[Connection] Initiating file transfer of %s for file ID %s to peer %s", filePath, fileId, peerID)
+	log.Printf("[Connection] Initiating file transfer of %s to peer %s", filePath, peerID)
 
 	sender := transfer.NewSender(
-		conn,
+		mc, // Pass the managed connection
 		filePath,
-		fileId,
 		pc.instanceID,
 		pc.peerName,
 		pc.transferCallbacks.OnProgress,
 		pc.transferCallbacks.OnComplete,
 		pc.transferCallbacks.OnError,
+		pc.transferCallbacks.OnHashingProgress,
 		parentId,
 		prefix,
 		rootDir,
@@ -226,7 +350,31 @@ func (pc *PeerConnection) handleIncomingConnection(conn net.Conn) {
 		// The callback will decide to accept or reject.
 		pc.onConnectionRequest(peer, func(accept bool, reason string) {
 			if accept {
-				pc.acceptConnection(peer, conn)
+				resp := ConnectionAcceptMessage{
+					BaseMessage: BaseMessage{
+						Type:           "CONNECTION_ACCEPT",
+						SenderInstance: pc.instanceID,
+						SenderName:     pc.peerName,
+						Timestamp:      time.Now().Unix(),
+					},
+				}
+				data, _ := framingprotocol.BuildFramedMessage(resp, nil)
+				_, err := conn.Write(data)
+				if err != nil {
+					log.Printf("[Connection] Error sending ACCEPT to %s: %v", peer.PeerName, err)
+					conn.Close()
+					return
+				}
+
+				mc := NewManagedConnection(conn, pc, peer)
+				pc.activeConnections.Store(peer.InstanceID, mc)
+
+				if pc.onPeerConnected != nil {
+					pc.onPeerConnected(peer)
+				}
+
+				log.Printf("[Connection] Connection accepted for %s. Starting reader loop.", peer.PeerName)
+				go mc.run() // Start the single reader loop
 			} else {
 				pc.rejectConnection(conn, reason)
 			}
@@ -290,10 +438,16 @@ func (pc *PeerConnection) ConnectToPeer(peer peerdiscovery.DiscoveredPeer) error
 		data, _ := json.Marshal(framed.Header)
 		switch framed.Header["type"] {
 		case "CONNECTION_ACCEPT":
-			pc.storeConnection(peer, conn)
+			mc := NewManagedConnection(conn, pc, peer)
+			pc.activeConnections.Store(peer.InstanceID, mc)
+
 			if pc.onPeerConnected != nil {
 				pc.onPeerConnected(peer)
 			}
+
+			log.Printf("[Connection] Connection to %s accepted. Starting reader loop.", peer.PeerName)
+			go mc.run() // Start the single reader loop
+
 			return nil
 		case "CONNECTION_REJECT":
 			var rej ConnectionRejectMessage
@@ -308,46 +462,6 @@ func (pc *PeerConnection) ConnectToPeer(peer peerdiscovery.DiscoveredPeer) error
 }
 
 // ==== Connection Helpers ====
-
-func (pc *PeerConnection) acceptConnection(peer peerdiscovery.DiscoveredPeer, conn net.Conn) {
-	resp := ConnectionAcceptMessage{
-		BaseMessage: BaseMessage{
-			Type:           "CONNECTION_ACCEPT",
-			SenderInstance: pc.instanceID,
-			SenderName:     pc.peerName,
-			Timestamp:      time.Now().Unix(),
-		},
-	}
-	data, _ := framingprotocol.BuildFramedMessage(resp, nil)
-	_, err := conn.Write(data)
-	if err != nil {
-		log.Printf("[Connection] Error sending ACCEPT to %s: %v", peer.PeerName, err)
-		conn.Close()
-		return
-	}
-
-	pc.storeConnection(peer, conn)
-
-	if pc.onPeerConnected != nil {
-		pc.onPeerConnected(peer)
-	}
-
-	// Hand off to receiver for file transfer messages
-	log.Printf("[Connection] Connection accepted for %s. Handing off to transfer receiver.", peer.PeerName)
-	receiver := transfer.NewReceiver(
-		conn,
-		pc.downloadDir,
-		peer,
-		pc.instanceID,
-		pc.peerName,
-		pc.transferCallbacks.OnProgress,
-		pc.transferCallbacks.OnComplete,
-		pc.transferCallbacks.OnError,
-		pc.transferCallbacks.OnHashingProgress,
-		pc.transferCallbacks.RequestAcceptance,
-	)
-	go receiver.Handle()
-}
 
 func (pc *PeerConnection) rejectConnection(conn net.Conn, reason string) {
 	resp := ConnectionRejectMessage{
@@ -364,19 +478,15 @@ func (pc *PeerConnection) rejectConnection(conn net.Conn, reason string) {
 	conn.Close()
 }
 
-func (pc *PeerConnection) storeConnection(peer peerdiscovery.DiscoveredPeer, conn net.Conn) {
-	pc.activeConnections.Store(peer.InstanceID, conn)
-}
-
 // ==== Utility ====
 
 func (pc *PeerConnection) GetConnectedPeers() []peerdiscovery.DiscoveredPeer {
 	var peers []peerdiscovery.DiscoveredPeer
 	pc.activeConnections.Range(func(_, value interface{}) bool {
-		conn := value.(net.Conn)
-		addr := conn.RemoteAddr().(*net.TCPAddr)
+		mc := value.(*ManagedConnection)
+		// This is incomplete, but matches original behavior of only returning IP
 		peers = append(peers, peerdiscovery.DiscoveredPeer{
-			IP: addr.IP.String(),
+			IP: mc.peer.IP,
 		})
 		return true
 	})
