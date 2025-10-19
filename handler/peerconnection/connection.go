@@ -109,7 +109,7 @@ func (pc *PeerConnection) InitiateFileTransfer(peerID string, filePath string, f
 	}
 	conn := val.(net.Conn)
 
-	log.Printf("[Connection] Initiating file transfer of %s to peer %s", filePath, peerID)
+	log.Printf("[Connection] Initiating file transfer of %s for file ID %s to peer %s", filePath, fileId, peerID)
 
 	sender := transfer.NewSender(
 		conn,
