@@ -10,7 +10,6 @@ import (
 	"net"
 	"os"
 	"sync"
-	"syscall"
 	"time"
 
 	"golang.org/x/net/ipv4"
@@ -127,16 +126,7 @@ func (pd *PeerDiscovery) Start() error {
 		return err
 	}
 
-	lc := net.ListenConfig{Control: func(network, address string, c syscall.RawConn) error {
-		var soErr error
-		err := c.Control(func(fd uintptr) {
-			soErr = syscall.SetsockoptInt(syscall.Handle(fd), syscall.SOL_SOCKET, syscall.SO_REUSEADDR, 1)
-		})
-		if err != nil {
-			return err
-		}
-		return soErr
-	}}
+	lc := net.ListenConfig{Control: setSocketOptions}
 
 	packetConn, err := lc.ListenPacket(context.Background(), "udp4", laddr.String())
 	if err != nil {
