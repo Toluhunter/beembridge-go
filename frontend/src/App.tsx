@@ -1,6 +1,7 @@
 'use client';
 import './App.css'; // Import global styles
 import React, { useEffect, useState } from 'react'; // Import useRef for file input
+import logoBb from '../public/logo-bb.svg';
 import { PeerView } from './components/views/peers.js';
 import { DiscoveredPeer } from './components/views/peers.js';
 import { ExplorerView, SelectedItem as SelectedFile } from './components/views/explorer.js';
@@ -12,6 +13,8 @@ import { BiTransfer } from "react-icons/bi";
 import { LuFolders } from "react-icons/lu";
 import { FaHistory } from "react-icons/fa";
 import { CiSettings } from "react-icons/ci";
+import { TbLayoutSidebarLeftCollapseFilled as CollapseIcon } from "react-icons/tb";
+import { TbLayoutSidebarRightCollapseFilled } from "react-icons/tb";
 import { IconType } from 'react-icons';
 import * as runtime from '../wailsjs/runtime/runtime.js';
 import { InitiateFileTransfer } from '../wailsjs/go/main/App.js';
@@ -39,6 +42,7 @@ const sidebarItems: SidebarItem[] = [
 const App = () => {
     const [activeView, setActiveView] = useState<SidebarItem['id']>('peers');
     const [isSidebarCollapsed, setIsSidebarCollapsed] = useState<boolean>(false); // State for sidebar collapse
+    const [isMouseOverSidebar, setIsMouseOverSidebar] = useState<boolean>(false);
     const [selectedFiles, setSelectedFiles] = useState<SelectedFile[]>([]);
     const [connectedPeers, setConnectedPeers] = useState<DiscoveredPeer[]>([]);
     const [userName, setUserName] = useState("BeemBridge User"); // Made userName mutable
@@ -151,29 +155,43 @@ const App = () => {
             {/* Global styles for Inter font and modern aesthetics */}
             {/* Sidebar */}
             <aside
-                className={`bg-gray-800 flex flex-col border-r border-gray-800 py-6 px-4 transition-all duration-300 ease-in-out relative
-          ${isSidebarCollapsed ? 'w-20 items-center' : 'w-1/5 min-w-[200px] max-w-[250px]'}`
+                onMouseEnter={() => setIsMouseOverSidebar(true)}
+                onMouseLeave={() => setIsMouseOverSidebar(false)}
+                className={`flex flex-col border-r border-gray-800 py-6 transition-all duration-300 ease-in-out relative
+          ${isSidebarCollapsed ? 'w-20 items-center' : 'w-1/5 min-w-[220px] max-w-[280px]'}`
                 }
                 style={{ boxShadow: '2px 0 10px rgba(0,0,0,0.3)' }} /* Subtle shadow for depth */
             >
-                <div className="flex-grow flex flex-col">
+                <div className="flex-grow flex flex-col w-full">
                     {/* Logo/App Name */}
-                    <div className={`mb-8 flex ${isSidebarCollapsed ? 'justify-center' : 'justify-between items-center'}`}>
-                        <h2 className="text-3xl font-extrabold text-white">
-                            {isSidebarCollapsed ? 'BB' : 'BeemBridge'}
-                        </h2>
-                        {/* Sidebar Toggle Button - Moved inside and adjusted positioning */}
-                        <button
-                            onClick={toggleSidebar}
-                            className="p-2 rounded-full shadow-lg text-gray-300 hover:bg-gray-700 focus:outline-none transition-transform duration-300 z-10 bg-gray-800"
-                            aria-label="Toggle Sidebar"
-                        >
-                            {isSidebarCollapsed ? (
-                                <svg className="w-5 h-5 transform rotate-180" fill="currentColor" viewBox="0 0 20 20" xmlns="http://www.w3.org/2000/svg"><path fillRule="evenodd" d="M12.707 5.293a1 1 0 010 1.414L9.414 10l3.293 3.293a1 1 0 01-1.414 1.414l-4-4a1 1 0 010-1.414l4-4a1 1 0 011.414 0z" clipRule="evenodd"></path></svg>
+                    <div className={`mb-8 flex items-center ${isSidebarCollapsed ? 'justify-center h-8' : 'justify-between'}`}>
+                        {isSidebarCollapsed ? (
+                            isMouseOverSidebar ? (
+                                <button
+                                    onClick={toggleSidebar}
+                                    className="p-2 rounded-lg shadow-lg text-gray-300 hover:bg-gray-700 focus:outline-none transition-transform duration-300 z-10 bg-gray-800"
+                                    aria-label="Toggle Sidebar"
+                                >
+                                    <TbLayoutSidebarRightCollapseFilled />
+                                </button>
                             ) : (
-                                <svg className="w-5 h-5" fill="currentColor" viewBox="0 0 20 20" xmlns="http://www.w3.org/2000/svg"><path fillRule="evenodd" d="M7.293 14.707a1 1 0 010-1.414L10.586 10 7.293 6.707a1 1 0 011.414-1.414l4 4a1 1 0 010 1.414l-4 4a1 1 0 01-1.414 0z" clipRule="evenodd"></path></svg>
-                            )}
-                        </button>
+                                <img src={logoBb} alt="BB Logo" className="pr-2 h-10 w-auto" />
+                            )
+                        ) : (
+                            <>
+                                <div className="flex items-center">
+                                    <img src={logoBb} alt="BeemBridge Logo" className="h-8 w-auto mx-2" />
+                                    <h2 className="text-2xl font-extrabold text-white">BeemBridge</h2>
+                                </div>
+                                <button
+                                    onClick={toggleSidebar}
+                                    className="p-2 rounded-lg shadow-lg text-gray-300 hover:bg-gray-700 focus:outline-none transition-transform duration-300 z-10 mr-2"
+                                    aria-label="Toggle Sidebar"
+                                >
+                                    <CollapseIcon size={20} />
+                                </button>
+                            </>
+                        )}
                     </div>
 
                     {/* Navigation */}
@@ -182,22 +200,29 @@ const App = () => {
                             {sidebarItems.map((item) => {
                                 const Icon = item.icon;
                                 return (
-                                    <li key={item.id} className="mb-2">
+                                    <li key={item.id} className="group relative">
                                         <button
                                             onClick={() => setActiveView(item.id)}
-                                            className={`flex items-center w-full px-4 py-3 rounded-xl text-left transition-colors duration-200
-                                            ${activeView === item.id
-                                                    ? 'bg-gray-700 text-white border-l-4 border-blue-500'
+                                            className={`flex items-center w-full px-4 py-3 my-5 rounded-xl text-left transition-colors duration-200
+                                        ${activeView === item.id
+                                                    ? 'bg-purple-700 text-white'
                                                     : 'text-gray-300 hover:bg-gray-700 hover:text-white'
                                                 }
-                                            ${isSidebarCollapsed ? 'justify-center px-2' : ''}`
+                                        ${isSidebarCollapsed ? 'justify-center px-2' : ''}`
                                             }
                                         >
-                                            <span className="text-2xl mr-3"><Icon /></span>
+                                            <span className={`text-2xl mr-3
+                                                ${activeView === item.id ? 'text-white' : 'text-gray-400 group-hover:text-white'}`
+                                            }><Icon /></span>
                                             {!isSidebarCollapsed && (
-                                                <span className="font-medium text-lg">{item.name}</span>
+                                                <span className="font-medium text-lg ml-3">{item.name}</span>
                                             )}
                                         </button>
+                                        {isSidebarCollapsed && (
+                                            <span className="absolute left-full ml-2 w-auto p-2 min-w-max rounded-md shadow-md text-white bg-gray-800 text-xs font-bold transition-all duration-100 scale-0 group-hover:scale-100 origin-left">
+                                                {item.name}
+                                            </span>
+                                        )}
                                     </li>
                                 );
                             })}
@@ -226,7 +251,7 @@ const App = () => {
             </aside>
 
             {/* Main Content */}
-            <main className="flex-1 bg-gray-900 p-8 overflow-auto rounded-l-3xl">
+            <main className="flex-1 p-8 overflow-auto">
                 {activeView === 'peers' && (
                     <PeerView
                         connectedPeers={connectedPeers}
