@@ -15,15 +15,18 @@ export interface SelectedItem {
 interface ExplorerViewProps {
     selectedFiles: SelectedItem[];
     onAddFiles: (files: SelectedItem[]) => void;
-    onRemoveFile: (fileToRemove: SelectedItem) => void;
+    onRemoveFiles: (filesToRemove: SelectedItem[]) => void; // Updated to accept an array
     connectedPeers: DiscoveredPeer[]; // Added connectedPeers prop
     onSendFilesToPeers: (files: SelectedItem[], targetPeers: DiscoveredPeer[]) => void; // New prop for sending files
 }
 
-export const ExplorerView: React.FC<ExplorerViewProps> = ({ selectedFiles, onAddFiles, onRemoveFile, connectedPeers, onSendFilesToPeers }) => {
+export const ExplorerView: React.FC<ExplorerViewProps> = ({ selectedFiles, onAddFiles, onRemoveFiles, connectedPeers, onSendFilesToPeers }) => {
     const [showSendModal, setShowSendModal] = useState(false);
     const [selectedPeerForSending, setSelectedPeerForSending] = useState<DiscoveredPeer | null>(null);
-    const [showAddOptions, setShowAddOptions] = useState(false); // NEW STATE
+    const [showAddOptions, setShowAddOptions] = useState(false);
+    const [selectedItemsForRemoval, setSelectedItemsForRemoval] = useState<Set<string>>(new Set()); // New state for checkboxes
+    const [sortColumn, setSortColumn] = useState<keyof SelectedItem | null>('name');
+    const [sortDirection, setSortDirection] = useState<'asc' | 'desc'>('asc');
 
     const handleOpenFile = async () => {
         try {
@@ -86,63 +89,201 @@ export const ExplorerView: React.FC<ExplorerViewProps> = ({ selectedFiles, onAdd
         }
     };
 
+    const handleCheckboxChange = (path: string, isChecked: boolean) => {
+        setSelectedItemsForRemoval(prev => {
+            const newSet = new Set(prev);
+            if (isChecked) {
+                newSet.add(path);
+            } else {
+                newSet.delete(path);
+            }
+            return newSet;
+        });
+    };
+
+    const handleRemoveSelected = () => {
+        const itemsToRemove = selectedFiles.filter(file => selectedItemsForRemoval.has(file.path));
+        onRemoveFiles(itemsToRemove); // Call with array
+        setSelectedItemsForRemoval(new Set()); // Clear selection after removal
+    };
+
+    const getType = (file: SelectedItem): string => {
+        if (file.isDirectory) return 'Folder';
+        const parts = file.name.split('.');
+        if (parts.length > 1) {
+            return parts[parts.length - 1].toUpperCase(); // Return extension in uppercase
+        }
+        return 'File';
+    };
+
+    const handleSort = (column: keyof SelectedItem | 'isDirectory') => {
+        if (sortColumn === column) {
+            setSortDirection(prev => (prev === 'asc' ? 'desc' : 'asc'));
+        } else {
+            setSortColumn(column);
+            setSortDirection('asc');
+        }
+    };
+
+    const sortedFiles = [...selectedFiles].sort((a, b) => {
+        if (!sortColumn) return 0;
+
+        let aValue: any;
+        let bValue: any;
+
+        if (sortColumn === 'isDirectory') {
+            aValue = getType(a);
+            bValue = getType(b);
+        } else {
+            aValue = a[sortColumn];
+            bValue = b[sortColumn];
+        }
+
+
+        // Handle boolean sorting for isDirectory
+        if (sortColumn === 'isDirectory') {
+            if (aValue === bValue) return 0;
+            if (sortDirection === 'asc') {
+                return aValue ? -1 : 1; // true (directories) come first
+            } else {
+                return aValue ? 1 : -1; // false (files) come first
+            }
+        }
+
+        // Handle string and number sorting
+        if (typeof aValue === 'string' && typeof bValue === 'string') {
+            return sortDirection === 'asc' ? aValue.localeCompare(bValue) : bValue.localeCompare(aValue);
+        } else if (typeof aValue === 'number' && typeof bValue === 'number') {
+            return sortDirection === 'asc' ? aValue - bValue : bValue - aValue;
+        }
+
+        return 0; // Should not happen if types are consistent
+    });
+
+
     return (
-        <div className="relative flex flex-col h-full bg-gray-800 rounded-2xl border border-gray-700 p-8 shadow-lg overflow-y-auto">
-            <h1 className="text-4xl font-bold text-white mb-4 text-center">File Explorer</h1>
-            <p className="text-gray-400 text-lg mb-6 text-center">Browse and manage your files for transfer.</p>
+        <div className="relative flex flex-col h-full p-8 shadow-lg overflow-y-auto">
+            <h1 className="text-4xl font-bold text-white mb-4 text-start">File Explorer</h1>
+            <p className="text-gray-400 text-lg mb-6 text-start">Browse and manage your files for transfer.</p>
 
             <button
                 onChange={handleOpenFile}
                 className="hidden"
             />
 
-            <div className="flex-1 w-full bg-gray-900 rounded-xl p-4 overflow-y-auto custom-scrollbar border border-gray-700">
-                {selectedFiles.length === 0 ? (
-                    <div className="flex flex-col items-center justify-center h-full text-gray-500">
+            <div className=" p-4 py-10 overflow-y-auto custom-scrollbar">
+                <div className="rounded-lg flex flex-col items-center justify-center h-full text-gray-500 p-10">
+                    <div className="border border-dashed bg-gray-800 w-100 rounded-lg flex flex-col items-center justify-center h-full text-gray-500 p-10">
                         <svg className="w-16 h-16 mb-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
                             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M9 13h6m-3-3v6m5 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"></path>
                         </svg>
                         <p className="text-lg">No files selected yet.</p>
                         <p className="text-sm">Click the `+`` button to add files.</p>
                     </div>
-                ) : (
-                    <ul className="space-y-3">
-                        {selectedFiles.map((file, index) => (
-                            <li
-                                key={`${file.name}-${file.size}-${index}`}
-                                className="flex items-center justify-between bg-gray-800 p-3 rounded-lg shadow-md border border-gray-700 hover:bg-gray-700 transition-colors duration-150"
-                            >
-                                <div className="flex items-center flex-grow min-w-0">
-                                    <span className="mr-3 text-blue-400 text-2xl">
-                                        {
-                                            // file.type.startsWith('image/') ? '�️' :
-                                            // file.type.startsWith('video/') ? '🎥' :
-                                            //     file.type.startsWith('audio/') ? '🎵' :
-                                            //         file.type.includes('pdf') ? '📄' :
-                                            '📁'}
-                                    </span>
-                                    <span className="text-white font-medium truncate flex-grow">
+                </div>
+
+                <div className="bg-gray-800 rounded-lg shadow-md overflow-hidden">
+                    <table className="min-w-full divide-y divide-gray-700">
+                        <thead className="bg-gray-700">
+                            <tr>
+                                <th className="px-4 py-3 text-left text-xs font-medium text-gray-300 uppercase tracking-wider">
+                                    <input
+                                        type="checkbox"
+                                        className="form-checkbox h-4 w-4 text-blue-600 transition duration-150 ease-in-out"
+                                        checked={selectedItemsForRemoval.size === selectedFiles.length && selectedFiles.length > 0}
+                                        onChange={(e) => {
+                                            if (e.target.checked) {
+                                                setSelectedItemsForRemoval(new Set(selectedFiles.map(file => file.path)));
+                                            } else {
+                                                setSelectedItemsForRemoval(new Set());
+                                            }
+                                        }}
+                                    />
+                                </th>
+                                <th
+                                    className="px-6 py-3 text-left text-xs font-medium text-gray-300 uppercase tracking-wider cursor-pointer"
+                                    onClick={() => handleSort('name')}
+                                >
+                                    Name
+                                    {sortColumn === 'name' && (sortDirection === 'asc' ? ' 🔼' : ' 🔽')}
+                                </th>
+                                <th
+                                    className="px-6 py-3 text-left text-xs font-medium text-gray-300 uppercase tracking-wider cursor-pointer"
+                                    onClick={() => handleSort('isDirectory')}
+                                >
+                                    Is Folder
+                                    {sortColumn === 'isDirectory' && (sortDirection === 'asc' ? ' 🔼' : ' 🔽')}
+                                </th>
+                                <th
+                                    className="px-6 py-3 text-left text-xs font-medium text-gray-300 uppercase tracking-wider cursor-pointer"
+                                    onClick={() => handleSort('isDirectory')}
+                                >
+                                    Type
+                                    {sortColumn === 'isDirectory' && (sortDirection === 'asc' ? ' 🔼' : ' 🔽')}
+                                </th>
+                                <th
+                                    className="px-6 py-3 text-left text-xs font-medium text-gray-300 uppercase tracking-wider cursor-pointer"
+                                    onClick={() => handleSort('size')}
+                                >
+                                    Size
+                                    {sortColumn === 'size' && (sortDirection === 'asc' ? ' 🔼' : ' 🔽')}
+                                </th>
+                                <th className="px-6 py-3 text-left text-xs font-medium text-gray-300 uppercase tracking-wider">
+                                    Actions
+                                </th>
+                            </tr>
+                        </thead>
+                        <tbody className="divide-y divide-gray-700">
+                            {sortedFiles.map((file) => (
+                                <tr key={file.path} className="hover:bg-gray-700">
+                                    <td className="px-4 py-4 whitespace-nowrap">
+                                        <input
+                                            type="checkbox"
+                                            className="form-checkbox h-4 w-4 text-blue-600 transition duration-150 ease-in-out"
+                                            checked={selectedItemsForRemoval.has(file.path)}
+                                            onChange={(e) => handleCheckboxChange(file.path, e.target.checked)}
+                                        />
+                                    </td>
+                                    <td className="px-6 py-4 whitespace-nowrap text-sm font-medium text-white flex items-center">
+                                        <span className="mr-2 text-blue-400">
+                                            {file.isDirectory ? '📁' : '📄'}
+                                        </span>
                                         {file.name}
-                                    </span>
-                                </div>
-                                <div className="flex items-center flex-shrink-0">
-                                    <span className="text-gray-400 text-sm ml-4">
+                                    </td>
+                                    <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-400">
+                                        {file.isDirectory ? 'Yes' : 'No'}
+                                    </td>
+                                    <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-400">
+                                        {getType(file)}
+                                    </td>
+                                    <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-400">
                                         {formatFileSize(file.size)}
-                                    </span>
-                                    <button
-                                        onClick={() => onRemoveFile(file)}
-                                        className="ml-3 p-1 rounded-full bg-red-600 hover:bg-red-700 text-white focus:outline-none focus:ring-2 focus:ring-red-500 focus:ring-opacity-50 transition-colors duration-150"
-                                        aria-label={`Remove ${file.name}`}
-                                    >
-                                        <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
-                                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M6 18L18 6M6 6l12 12"></path>
-                                        </svg>
-                                    </button>
-                                </div>
-                            </li>
-                        ))}
-                    </ul>
-                )}
+                                    </td>
+                                    <td className="px-6 py-4 whitespace-nowrap text-right text-sm font-medium">
+                                        <button
+                                            onClick={() => onRemoveFiles([file])} // Call with single-item array
+                                            className="text-red-600 hover:text-red-900 ml-2"
+                                            aria-label={`Remove ${file.name}`}
+                                        >
+                                            Remove
+                                        </button>
+                                    </td>
+                                </tr>
+                            ))}
+                        </tbody>
+                    </table>
+                    {selectedItemsForRemoval.size > 0 && (
+                        <div className="p-4 bg-gray-700 border-t border-gray-600 flex justify-end">
+                            <button
+                                onClick={handleRemoveSelected}
+                                className="px-4 py-2 bg-red-600 hover:bg-red-700 text-white rounded-lg shadow-md transition-colors duration-150"
+                            >
+                                Remove Selected ({selectedItemsForRemoval.size})
+                            </button>
+                        </div>
+                    )}
+                </div>
+
             </div>
 
             {/* Send Button - Always visible now */}
@@ -235,6 +376,7 @@ export const ExplorerView: React.FC<ExplorerViewProps> = ({ selectedFiles, onAdd
                     </div>
                 </div>
             )}
-        </div>
-    );
+        </div>);
 };
+
+export default ExplorerView;
