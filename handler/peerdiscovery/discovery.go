@@ -47,7 +47,14 @@ type PeerDiscovery struct {
 	PeerName   string
 	tcpPort    int
 	multicast  *net.UDPAddr
-	conn       *net.UDPConn
+	// one UDPConn per interface to ensure multicast egress on every NIC
+	sendConns []struct {
+		Iface net.Interface
+		Conn  *net.UDPConn
+	}
+
+	// single receive socket bound to 0.0.0.0:<port> joined on all interfaces
+	recvConn *net.UDPConn
 
 	mu      sync.Mutex
 	peers   map[string]DiscoveredPeer
@@ -120,43 +127,85 @@ func (pd *PeerDiscovery) Start() error {
 		return err
 	}
 
-	// Bind to all interfaces (0.0.0.0)
-	laddr, err := net.ResolveUDPAddr("udp4", fmt.Sprintf("0.0.0.0:%d", addr.Port))
-	if err != nil {
-		return err
-	}
-
+	// Create receiver socket bound to INADDR_ANY and join group on every interface
 	lc := net.ListenConfig{Control: setSocketOptions}
-
-	packetConn, err := lc.ListenPacket(context.Background(), "udp4", laddr.String())
+	recvLaddr := &net.UDPAddr{IP: net.IPv4zero, Port: addr.Port}
+	packetConn, err := lc.ListenPacket(context.Background(), "udp4", recvLaddr.String())
 	if err != nil {
-		return fmt.Errorf("failed to listen on UDP port: %w", err)
+		return fmt.Errorf("failed to listen on UDP port for receiver: %w", err)
 	}
-
-	conn := packetConn.(*net.UDPConn)
-
-	p := ipv4.NewPacketConn(conn)
-	p.SetMulticastLoopback(true)
-	p.SetMulticastTTL(1)
+	recv := packetConn.(*net.UDPConn)
+	pRecv := ipv4.NewPacketConn(recv)
+	pRecv.SetMulticastLoopback(true)
+	pRecv.SetMulticastTTL(1)
 
 	ifaces, _ := net.Interfaces()
+	// join group for receive on all multicast-capable interfaces
 	for _, iface := range ifaces {
-		if iface.Flags&net.FlagMulticast != 0 && iface.Flags&net.FlagUp != 0 {
-			err := p.JoinGroup(&iface, &net.UDPAddr{IP: addr.IP})
-			if err != nil {
-				log.Printf("[Discovery] Failed to join on %s: %v", iface.Name, err)
-			} else {
-				log.Printf("[Discovery] Joined multicast group on %s", iface.Name)
-			}
+		if iface.Flags&net.FlagMulticast == 0 || iface.Flags&net.FlagUp == 0 {
+			log.Printf("[Discovery] Skipping interface %s (multicast: %v, up: %v)", iface.Name, iface.Flags&net.FlagMulticast != 0, iface.Flags&net.FlagUp != 0)
+			continue
 		}
+		if err := pRecv.JoinGroup(&iface, &net.UDPAddr{IP: addr.IP}); err != nil {
+			log.Printf("[Discovery] Failed to join multicast group for recv on %s: %v", iface.Name, err)
+		} else {
+			log.Printf("[Discovery] Receiver joined multicast group on %s", iface.Name)
+		}
+	}
+	recv.SetReadBuffer(2048)
+	pd.recvConn = recv
+	// start single listener for receive socket
+	go pd.listenOnConn(recv)
+
+	// Create per-interface send sockets bound to the interface's IPv4 address (ephemeral local port)
+	pd.sendConns = nil
+	for _, iface := range ifaces {
+		if iface.Flags&net.FlagMulticast == 0 || iface.Flags&net.FlagUp == 0 {
+			continue
+		}
+		addrs, err := iface.Addrs()
+		if err != nil {
+			continue
+		}
+		var ipv4Addr net.IP
+		for _, a := range addrs {
+			var ip net.IP
+			switch v := a.(type) {
+			case *net.IPNet:
+				ip = v.IP
+			case *net.IPAddr:
+				ip = v.IP
+			}
+			if ip == nil || ip.To4() == nil {
+				continue
+			}
+			if ip.IsLoopback() {
+				continue
+			}
+			ipv4Addr = ip.To4()
+			break
+		}
+		if ipv4Addr == nil {
+			continue
+		}
+		laddr := &net.UDPAddr{IP: ipv4Addr, Port: 0}
+		sendConn, err := net.ListenUDP("udp4", laddr)
+		if err != nil {
+			log.Printf("[Discovery] Failed to create send socket on %s: %v", iface.Name, err)
+			continue
+		}
+		pd.sendConns = append(pd.sendConns, struct {
+			Iface net.Interface
+			Conn  *net.UDPConn
+		}{Iface: iface, Conn: sendConn})
+		log.Printf("[Discovery] Send socket created on %s (%s)", iface.Name, laddr.String())
 	}
 
 	pd.stopCh = make(chan struct{})
-	pd.conn = conn
 	pd.running = true
-	pd.conn.SetReadBuffer(2048)
-
-	go pd.listen()
+	if pd.recvConn == nil {
+		return fmt.Errorf("no multicast receiver available")
+	}
 	go pd.broadcastLoop()
 	go pd.cleanupLoop()
 
@@ -177,14 +226,21 @@ func (pd *PeerDiscovery) Stop() {
 
 	// Clear peers
 	pd.peers = make(map[string]DiscoveredPeer)
-
-	connToClose := pd.conn
-	pd.conn = nil
+	conns := pd.sendConns
+	pd.sendConns = nil
 
 	pd.mu.Unlock()
 
-	if connToClose != nil {
-		connToClose.Close()
+	// close send sockets
+	for _, c := range conns {
+		if c.Conn != nil {
+			c.Conn.Close()
+		}
+	}
+	// close recv socket
+	if pd.recvConn != nil {
+		pd.recvConn.Close()
+		pd.recvConn = nil
 	}
 	log.Printf("[Discovery] %s stopped\n", pd.PeerName)
 }
@@ -218,19 +274,26 @@ func (pd *PeerDiscovery) broadcastPresence() {
 
 	data, _ := framingprotocol.BuildFramedMessage(msg, nil)
 
-	_, err := pd.conn.WriteToUDP(data, pd.multicast)
-	if err != nil {
-		log.Printf("[Discovery] Error broadcasting from %s: %v\n", pd.PeerName, err)
+	// Send once per interface socket so the kernel uses that interface as source
+	for _, c := range pd.sendConns {
+		if c.Conn == nil {
+			continue
+		}
+		_, err := c.Conn.WriteToUDP(data, pd.multicast)
+		if err != nil {
+			log.Printf("[Discovery] Error broadcasting from %s on %s: %v\n", pd.PeerName, c.Iface.Name, err)
+		}
 	}
 }
 
-// listen receives multicast packets and updates peer list.
-func (pd *PeerDiscovery) listen() {
+// listenOnConn reads from a specific UDPConn and updates peers.
+func (pd *PeerDiscovery) listenOnConn(conn *net.UDPConn) {
+	log.Println("[Discovery] Listening for peers on a connection...")
 	buf := make([]byte, 2048)
 	parser := framingprotocol.NewFrameParser()
 
 	for {
-		n, src, err := pd.conn.ReadFromUDP(buf)
+		n, src, err := conn.ReadFromUDP(buf)
 		if err != nil {
 			select {
 			case <-pd.stopCh:
@@ -258,6 +321,7 @@ func (pd *PeerDiscovery) listen() {
 			if msg.InstanceID == pd.instanceID || msg.AppID != pd.appID {
 				continue
 			}
+			log.Printf("[Discovery] Received message from %s: %+v\n", src.IP, msg)
 
 			pd.mu.Lock()
 			pd.peers[msg.InstanceID] = DiscoveredPeer{
@@ -269,8 +333,6 @@ func (pd *PeerDiscovery) listen() {
 
 			log.Printf("[Discovery] %s discovered peer %s @ %s:%d\n", pd.PeerName, msg.PeerName, src.IP, msg.TCPPort)
 		}
-
-		// Ignore messages from ourselves or other apps
 	}
 }
 
