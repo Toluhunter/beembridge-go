@@ -5,7 +5,6 @@ import (
 	"beembridge-go/handler/peerdiscovery"
 	"beembridge-go/handler/transfer"
 	"context"
-	"fmt"
 	"log"
 	"os"
 	"path/filepath"
@@ -104,11 +103,19 @@ func (a *App) startup(ctx context.Context) {
 	if err := pc.StartTCPServer(); err != nil {
 		log.Fatalf("Failed to start TCP server: %v", err)
 	}
-}
 
-// Greet returns a greeting for the given name
-func (a *App) Greet(name string) string {
-	return fmt.Sprintf("Hello %s, It's show time!", name)
+	// Register drag-and-drop handler in Go. When files are dropped onto the
+	// window this will resolve their stats and emit an `onFilesDropped` event
+	// to the frontend with the list of SelectedItem objects.
+	runtime.OnFileDrop(a.ctx, func(x, y int, paths []string) {
+		log.Printf("Files dropped at %d,%d: %v", x, y, paths)
+		files, err := a.GetFileStats(paths)
+		if err != nil {
+			log.Printf("Error getting file stats for dropped files: %v", err)
+			return
+		}
+		runtime.EventsEmit(a.ctx, "onFilesDropped", files)
+	})
 }
 
 // StartPeerDiscovery starts the peer discovery service.
@@ -121,6 +128,15 @@ func (a *App) StartPeerDiscovery() {
 // StopPeerDiscovery stops the peer discovery service.
 func (a *App) StopPeerDiscovery() {
 	a.peerDiscovery.Stop()
+}
+
+func (a *App) DisconnectFromPeer(peerID string) {
+	ok := a.peerConnection.DisconnectPeer(peerID)
+	if !ok {
+		log.Printf("No active connection found for peer ID/Unable to Disconnect: %s", peerID)
+	} else {
+		log.Printf("Disconnected from peer: %s", peerID)
+	}
 }
 
 // GetDiscoveredPeers returns the list of discovered peers.

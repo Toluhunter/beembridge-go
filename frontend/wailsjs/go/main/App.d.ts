@@ -5,13 +5,13 @@ import {main} from '../models';
 
 export function ConnectToPeer(arg1:peerdiscovery.DiscoveredPeer):Promise<void>;
 
+export function DisconnectFromPeer(arg1:string):Promise<void>;
+
 export function GetConnectedPeers():Promise<Array<peerdiscovery.DiscoveredPeer>>;
 
 export function GetDiscoveredPeers():Promise<Array<peerdiscovery.DiscoveredPeer>>;
 
 export function GetFileStats(arg1:Array<string>):Promise<Array<main.SelectedItem>>;
-
-export function Greet(arg1:string):Promise<string>;
 
 export function InitiateFileTransfer(arg1:string,arg2:Array<main.SelectedItem>):Promise<void>;
 

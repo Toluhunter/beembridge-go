@@ -6,6 +6,10 @@ export function ConnectToPeer(arg1) {
   return window['go']['main']['App']['ConnectToPeer'](arg1);
 }
 
+export function DisconnectFromPeer(arg1) {
+  return window['go']['main']['App']['DisconnectFromPeer'](arg1);
+}
+
 export function GetConnectedPeers() {
   return window['go']['main']['App']['GetConnectedPeers']();
 }
@@ -16,10 +20,6 @@ export function GetDiscoveredPeers() {
 
 export function GetFileStats(arg1) {
   return window['go']['main']['App']['GetFileStats'](arg1);
-}
-
-export function Greet(arg1) {
-  return window['go']['main']['App']['Greet'](arg1);
 }
 
 export function InitiateFileTransfer(arg1, arg2) {

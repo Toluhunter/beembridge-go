@@ -22,6 +22,11 @@ func (e *FramingError) Error() string {
 	return fmt.Sprintf("FramingError: %s", e.Message)
 }
 
+const (
+	MaxHeaderSize  = 1 << 20 // e.g., 1 MiB
+	MaxPayloadSize = 1 << 30 // e.g., 1 GiB — tune this for your app
+)
+
 // BuildFramedMessage constructs a framed message as bytes.
 // Format: [4-byte header length][JSON header][4-byte payload length][binary payload]
 func BuildFramedMessage(header interface{}, payload []byte) ([]byte, error) {
@@ -65,11 +70,20 @@ func BuildFramedMessage(header interface{}, payload []byte) ([]byte, error) {
 }
 
 // FrameParser incrementally parses incoming framed messages from a TCP stream.
+type parserState uint8
+
+const (
+	waitingHeaderLength parserState = iota
+	waitingHeader
+	waitingPayloadLength
+	waitingPayload
+)
+
 type FrameParser struct {
 	buffer                []byte
 	expectedHeaderLength  uint32
 	expectedPayloadLength uint32
-	state                 string
+	state                 parserState
 	currentHeader         map[string]interface{}
 }
 
@@ -77,7 +91,7 @@ type FrameParser struct {
 func NewFrameParser() *FrameParser {
 	return &FrameParser{
 		buffer: []byte{},
-		state:  "WAITING_HEADER_LENGTH",
+		state:  waitingHeaderLength,
 	}
 }
 
@@ -88,15 +102,15 @@ func (fp *FrameParser) Feed(chunk []byte) ([]FramedMessage, error) {
 
 	for {
 		switch fp.state {
-		case "WAITING_HEADER_LENGTH":
+		case waitingHeaderLength:
 			if len(fp.buffer) < 4 {
 				return messages, nil // not enough data yet
 			}
 			fp.expectedHeaderLength = binary.LittleEndian.Uint32(fp.buffer[:4])
 			fp.buffer = fp.buffer[4:]
-			fp.state = "WAITING_HEADER"
+			fp.state = waitingHeader
 
-		case "WAITING_HEADER":
+		case waitingHeader:
 			if uint32(len(fp.buffer)) < fp.expectedHeaderLength {
 				return messages, nil
 			}
@@ -104,21 +118,21 @@ func (fp *FrameParser) Feed(chunk []byte) ([]FramedMessage, error) {
 			fp.buffer = fp.buffer[fp.expectedHeaderLength:]
 
 			if err := json.Unmarshal(headerBytes, &fp.currentHeader); err != nil {
-				fp.Reset()
+				fp.ResetOnError()
 				return nil, &FramingError{Message: "Failed to parse JSON header"}
 			}
 
-			fp.state = "WAITING_PAYLOAD_LENGTH"
+			fp.state = waitingPayloadLength
 
-		case "WAITING_PAYLOAD_LENGTH":
+		case waitingPayloadLength:
 			if len(fp.buffer) < 4 {
 				return messages, nil
 			}
 			fp.expectedPayloadLength = binary.LittleEndian.Uint32(fp.buffer[:4])
 			fp.buffer = fp.buffer[4:]
-			fp.state = "WAITING_PAYLOAD"
+			fp.state = waitingPayload
 
-		case "WAITING_PAYLOAD":
+		case waitingPayload:
 			if uint32(len(fp.buffer)) < fp.expectedPayloadLength {
 				return messages, nil
 			}
@@ -141,7 +155,7 @@ func (fp *FrameParser) Feed(chunk []byte) ([]FramedMessage, error) {
 			fp.expectedHeaderLength = 0
 			fp.expectedPayloadLength = 0
 			fp.currentHeader = nil
-			fp.state = "WAITING_HEADER_LENGTH"
+			fp.state = waitingHeaderLength
 
 			if len(fp.buffer) == 0 {
 				return messages, nil
@@ -157,6 +171,61 @@ func (fp *FrameParser) Reset() {
 	fp.buffer = []byte{}
 	fp.expectedHeaderLength = 0
 	fp.expectedPayloadLength = 0
-	fp.state = "WAITING_HEADER_LENGTH"
+	fp.state = waitingHeaderLength
 	fp.currentHeader = nil
+}
+
+// ResetOnError tries to resynchronize the parser buffer when a header is invalid.
+// It searches for the next plausible header-length field and a valid JSON header right after it.
+// If nothing looks plausible it does a hard Reset.
+func (fp *FrameParser) ResetOnError() {
+	buf := fp.buffer
+	n := len(buf)
+
+	// minimal bytes to hold a headerLen + at least 0 header bytes
+	if n < 4 {
+		// not enough to find anything useful — just clear
+		fp.Reset()
+		return
+	}
+
+	// scan for a possible header-length field
+	for i := 0; i+4 <= n; i++ {
+		candidateLen := binary.LittleEndian.Uint32(buf[i : i+4])
+
+		// sanity checks on candidate header length
+		if candidateLen == 0 || candidateLen > MaxHeaderSize {
+			continue
+		}
+
+		// ensure we actually have header bytes available to validate
+		headerStart := i + 4
+		headerEnd := headerStart + int(candidateLen)
+		if headerEnd > n {
+			// not enough bytes yet — we should keep the tail bytes for next read
+			// keep everything from i (potential start) onwards and reset state ready to parse header-length
+			fp.buffer = buf[i:]
+			fp.state = waitingHeaderLength
+			fp.expectedHeaderLength = 0
+			fp.expectedPayloadLength = 0
+			fp.currentHeader = nil
+			return
+		}
+
+		// attempt to unmarshal the candidate header
+		var tmp map[string]interface{}
+		if err := json.Unmarshal(buf[headerStart:headerEnd], &tmp); err == nil {
+			// Found a plausible start — keep everything from this frame's header-length onward
+			fp.buffer = buf[i:]
+			fp.state = waitingHeaderLength
+			fp.expectedHeaderLength = 0
+			fp.expectedPayloadLength = 0
+			fp.currentHeader = nil
+			return
+		}
+		// else keep scanning
+	}
+
+	// If we get here, no plausible boundary found — hard reset (safe fallback)
+	fp.Reset()
 }

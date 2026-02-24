@@ -4,7 +4,7 @@ import React, { useEffect, useState } from 'react'; // Import useRef for file in
 import logoBb from '../public/logo-bb.svg';
 import { PeerView } from './components/views/peers.js';
 import { DiscoveredPeer } from './components/views/peers.js';
-import { ExplorerView, SelectedItem as SelectedFile } from './components/views/explorer.js';
+import { ExplorerView, } from './components/views/explorer.js';
 import { TransferHistoryView } from './components/views/transfer-history.js';
 import { ActiveTransferView, ActiveTransferDisplayItem } from './components/views/active-transfers.js';
 import { SettingsView } from './components/views/settings.js';
@@ -19,7 +19,7 @@ const App = () => {
     const [activeView, setActiveView] = useState<SidebarItem['id']>('peers');
     const [isSidebarCollapsed, setIsSidebarCollapsed] = useState<boolean>(false); // State for sidebar collapse
     const [isMouseOverSidebar, setIsMouseOverSidebar] = useState<boolean>(false);
-    const [selectedFiles, setSelectedFiles] = useState<SelectedFile[]>([]);
+    const [selectedFiles, setSelectedFiles] = useState<main.SelectedItem[]>([]);
     const [connectedPeers, setConnectedPeers] = useState<DiscoveredPeer[]>([]);
     const [userName, setUserName] = useState("BeemBridge User"); // Made userName mutable
     const [userId, setUserId] = useState("BB_USER_1234567890"); // Made userId mutable
@@ -27,7 +27,7 @@ const App = () => {
     const [activeTransfers, setActiveTransfers] = useState<ActiveTransferDisplayItem[]>([]);
     const [hashingProgress, setHashingProgress] = useState<{ [key: string]: number }>({});
 
-    const handleAddSelectedFiles = (newFiles: SelectedFile[]) => {
+    const handleAddSelectedFiles = (newFiles: main.SelectedItem[]) => {
         const uniqueNewFiles = newFiles.filter(newFile =>
             !selectedFiles.some(existingFile =>
                 existingFile.name === newFile.name && existingFile.size === newFile.size
@@ -36,7 +36,7 @@ const App = () => {
         setSelectedFiles(prevFiles => [...prevFiles, ...uniqueNewFiles]);
     };
 
-    const handleRemoveSelectedFiles = (filesToRemove: SelectedFile[]) => {
+    const handleRemoveSelectedFiles = (filesToRemove: main.SelectedItem[]) => {
         setSelectedFiles(prevFiles =>
             prevFiles.filter(existingFile =>
                 !filesToRemove.some(fileToRemove =>
@@ -46,7 +46,7 @@ const App = () => {
         );
     };
 
-    const handleSendFilesToPeers = (files: SelectedFile[], targetPeers: DiscoveredPeer[]) => {
+    const handleSendFilesToPeers = (files: main.SelectedItem[], targetPeers: DiscoveredPeer[]) => {
         if (targetPeers.length > 0) {
             const peerID = targetPeers[0].instanceId;
             const itemsToSend = files.map(f => main.SelectedItem.createFrom(f));
@@ -146,7 +146,7 @@ const App = () => {
                 />
 
                 {/* Main Content */}
-                <main className="flex-1 p-8 overflow-auto">
+                <main className="flex-1 p-4 overflow-auto">
                     {activeView === 'peers' && (
                         <PeerView
                             connectedPeers={connectedPeers}

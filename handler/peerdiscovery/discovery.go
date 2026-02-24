@@ -54,7 +54,7 @@ type PeerDiscovery struct {
 	}
 
 	// single receive socket bound to 0.0.0.0:<port> joined on all interfaces
-	recvConn *net.UDPConn
+	recvConn net.PacketConn
 
 	mu      sync.Mutex
 	peers   map[string]DiscoveredPeer
@@ -67,13 +67,13 @@ type PeerDiscovery struct {
 // bindToRandomPort tries to find and bind to an available TCP port.
 func bindToRandomPort() (int, error) {
 	for {
-		port := rand.Intn(55535) + 10000 // Random port between 10000 and 65535
+		port := rand.Intn(55535) + 10000 // Random port for TCP connections (10000-65535)
 		addr, err := net.ResolveTCPAddr("tcp", fmt.Sprintf(":%d", port))
 		if err != nil {
-			continue // Should not happen with a valid port
+			continue // try another port
 		}
 
-		l, err := net.ListenTCP("tcp", addr)
+		l, err := net.ListenTCP("tcp", &net.TCPAddr{IP: net.IPv4zero, Port: addr.Port})
 		if err == nil {
 			defer l.Close()
 			return l.Addr().(*net.TCPAddr).Port, nil
@@ -134,8 +134,8 @@ func (pd *PeerDiscovery) Start() error {
 	if err != nil {
 		return fmt.Errorf("failed to listen on UDP port for receiver: %w", err)
 	}
-	recv := packetConn.(*net.UDPConn)
-	pRecv := ipv4.NewPacketConn(recv)
+	// keep the packetConn (net.PacketConn) for reads; wrap it with ipv4.PacketConn for control ops
+	pRecv := ipv4.NewPacketConn(packetConn)
 	pRecv.SetMulticastLoopback(true)
 	pRecv.SetMulticastTTL(1)
 
@@ -152,10 +152,13 @@ func (pd *PeerDiscovery) Start() error {
 			log.Printf("[Discovery] Receiver joined multicast group on %s", iface.Name)
 		}
 	}
-	recv.SetReadBuffer(2048)
-	pd.recvConn = recv
+	// try to set read buffer if underlying conn is a UDPConn
+	if u, ok := packetConn.(*net.UDPConn); ok {
+		u.SetReadBuffer(2048)
+	}
+	pd.recvConn = packetConn
 	// start single listener for receive socket
-	go pd.listenOnConn(recv)
+	go pd.listenOnConn(packetConn)
 
 	// Create per-interface send sockets bound to the interface's IPv4 address (ephemeral local port)
 	pd.sendConns = nil
@@ -286,14 +289,14 @@ func (pd *PeerDiscovery) broadcastPresence() {
 	}
 }
 
-// listenOnConn reads from a specific UDPConn and updates peers.
-func (pd *PeerDiscovery) listenOnConn(conn *net.UDPConn) {
+// listenOnConn reads from a PacketConn and updates peers.
+func (pd *PeerDiscovery) listenOnConn(conn net.PacketConn) {
 	log.Println("[Discovery] Listening for peers on a connection...")
 	buf := make([]byte, 2048)
 	parser := framingprotocol.NewFrameParser()
 
 	for {
-		n, src, err := conn.ReadFromUDP(buf)
+		n, srcAddr, err := conn.ReadFrom(buf)
 		if err != nil {
 			select {
 			case <-pd.stopCh:
@@ -303,6 +306,7 @@ func (pd *PeerDiscovery) listenOnConn(conn *net.UDPConn) {
 				continue
 			}
 		}
+		src, _ := srcAddr.(*net.UDPAddr)
 
 		messages, err := parser.Feed(buf[:n])
 		if err != nil {
@@ -321,7 +325,6 @@ func (pd *PeerDiscovery) listenOnConn(conn *net.UDPConn) {
 			if msg.InstanceID == pd.instanceID || msg.AppID != pd.appID {
 				continue
 			}
-			log.Printf("[Discovery] Received message from %s: %+v\n", src.IP, msg)
 
 			pd.mu.Lock()
 			pd.peers[msg.InstanceID] = DiscoveredPeer{
@@ -330,8 +333,6 @@ func (pd *PeerDiscovery) listenOnConn(conn *net.UDPConn) {
 				IP:               src.IP.String(),
 			}
 			pd.mu.Unlock()
-
-			log.Printf("[Discovery] %s discovered peer %s @ %s:%d\n", pd.PeerName, msg.PeerName, src.IP, msg.TCPPort)
 		}
 	}
 }

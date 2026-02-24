@@ -18,9 +18,8 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
     onGenerateNewUserId,
     onSetStoragePath
 }) => {
-    // These states now live here, controlling the username editing UI
+    // Username input state (always editable)
     const [tempUserName, setTempUserName] = useState(currentUserName);
-    const [isEditingUsername, setIsEditingUsername] = useState(false);
 
     // Effect to update tempUserName when currentUserName prop changes (e.g., initial load)
     useEffect(() => {
@@ -39,7 +38,6 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
                 // Call the prop that sends update to main process
                 const success = await onUpdateUserNameInMainProcess(trimmedName);
                 if (success) {
-                    setIsEditingUsername(false); // Exit editing mode on successful save
                     // The `currentUserName` prop will be updated from App.tsx via IPC,
                     // which will then update `tempUserName` via the useEffect above.
                     console.log("Username saved and sent to main process.");
@@ -50,15 +48,9 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
                 console.error("Error saving username via IPC:", error);
             }
         } else {
-            // If name is empty or unchanged, just exit editing mode
-            setIsEditingUsername(false);
-            setTempUserName(currentUserName); // Reset temp if no change or invalid
+            // If name is empty or unchanged, reset to last saved
+            setTempUserName(currentUserName);
         }
-    };
-
-    const handleCancelEdit = () => {
-        setIsEditingUsername(false);
-        setTempUserName(currentUserName); // Revert to the last saved username
     };
 
     const handleGenerateId = async () => {
@@ -67,94 +59,69 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
     };
 
     return (
-        <div className="flex flex-col h-full bg-gray-800 rounded-2xl border border-gray-700 p-8 shadow-lg overflow-y-auto">
-            <h1 className="text-4xl font-bold text-white mb-6 text-center">Settings</h1>
+        <div className="flex flex-col h-full p-8 overflow-y-auto">
+            <h1 className="text-3xl font-semibold text-white mb-6 text-left">Settings</h1>
 
-            {/* User Name Section */}
-            <div className="mb-8 p-6 bg-gray-900 rounded-xl border border-gray-700">
-                <h2 className="text-2xl font-semibold text-white mb-4">User Profile</h2>
-                <div className="mb-4 flex items-center">
-                    <label htmlFor="username" className="block text-gray-400 text-lg font-medium mr-4 w-24">
-                        Username:
-                    </label>
-                    {isEditingUsername ? (
-                        <>
+            <div className="flex flex-col divide-y divide-gray-800">
+                {/* Username Row */}
+                <div className="px-4 py-4 hover:bg-gray-500/10 rounded-md transition-colors">
+                    <div className="flex flex-col items-start gap-2">
+                        <label htmlFor="username" className="text-base font-medium text-gray-200">Username</label>
+                        <div className="w-full flex flex-col sm:flex-row items-start sm:items-center gap-3">
                             <input
                                 type="text"
                                 id="username"
                                 value={tempUserName}
                                 onChange={handleUserNameChange}
-                                className="flex-grow p-3 rounded-lg bg-gray-700 text-white border border-gray-600 focus:outline-none focus:ring-2 focus:ring-blue-500 mr-2"
+                                onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); void handleSaveUserName(); } }}
+                                className="min-w-[280px] sm:min-w-[360px] w-full sm:w-auto px-3 py-2 rounded-md bg-gray-800/40 text-white border border-gray-700 focus:outline-none focus:ring-2 focus:ring-blue-500"
                                 placeholder="Enter new username"
                             />
-                            <button
-                                onClick={handleSaveUserName}
-                                className="modern-button text-white font-bold py-2 px-4 rounded-lg shadow-md transition-colors duration-200 mr-2"
-                            >
-                                Save
-                            </button>
-                            <button
-                                onClick={handleCancelEdit}
-                                className="modern-button text-white font-bold py-2 px-4 rounded-lg shadow-md bg-red-600 hover:bg-red-700 transition-colors duration-200"
-                            >
-                                Cancel
-                            </button>
-                        </>
-                    ) : (
-                        <>
-                            <p className="text-white text-lg flex-grow">{currentUserName}</p>
-                            <button
-                                onClick={() => setIsEditingUsername(true)}
-                                className="modern-button text-white font-bold py-2 px-4 rounded-lg shadow-md transition-colors duration-200"
-                            >
-                                Edit
-                            </button>
-                        </>
-                    )}
+                        </div>
+                    </div>
                 </div>
-            </div>
 
-            {/* User ID Section */}
-            <div className="mb-8 p-6 bg-gray-900 rounded-xl border border-gray-700">
-                <h2 className="text-2xl font-semibold text-white mb-4">User ID</h2>
-                <p className="text-gray-300 text-lg mb-4 break-all">
-                    Current ID: <span className="font-mono bg-gray-700 p-2 rounded-md">{currentUserId}</span>
-                </p>
-                <button
-                    onClick={handleGenerateId}
-                    className="modern-button text-white font-bold py-2 px-4 rounded-lg shadow-md transition-colors duration-200"
-                >
-                    Generate New ID
-                </button>
-            </div>
+                {/* User ID Row */}
+                <div className="px-4 py-4 hover:bg-gray-500/10 rounded-md transition-colors">
+                    <div className="flex flex-col items-start gap-2">
+                        <div className="text-base font-medium text-gray-200">User ID</div>
+                        <p className="text-gray-300 text-sm sm:text-base break-all font-mono min-w-[280px] sm:min-w-[360px] w-full sm:w-auto text-left">{currentUserId}</p>
+                        <button
+                            onClick={handleGenerateId}
+                            className="mt-1 px-3 py-2 text-sm rounded-md border border-gray-600 text-gray-200 hover:bg-gray-500/20"
+                        >
+                            Generate New ID
+                        </button>
+                    </div>
+                </div>
 
-            {/* Storage Path Section */}
-            <div className="mb-8 p-6 bg-gray-900 rounded-xl border border-gray-700">
-                <h2 className="text-2xl font-semibold text-white mb-4">Storage Path</h2>
-                <p className="text-gray-300 text-lg mb-4 break-all">
-                    Files will be saved to: <span className="font-mono bg-gray-700 p-2 rounded-md">{storagePath}</span>
-                </p>
-                <button
-                    onClick={onSetStoragePath}
-                    className="modern-button text-white font-bold py-2 px-4 rounded-lg shadow-md transition-colors duration-200"
-                >
-                    Set Storage Path
-                </button>
+                {/* Storage Path Row */}
+                <div className="px-4 py-4 hover:bg-gray-500/10 rounded-md transition-colors">
+                    <div className="flex flex-col items-start gap-2">
+                        <div className="text-base font-medium text-gray-200">Storage Path</div>
+                        <p className="text-gray-300 text-sm sm:text-base break-all font-mono min-w-[280px] sm:min-w-[360px] w-full sm:w-auto text-left">{storagePath}</p>
+                        <button
+                            onClick={onSetStoragePath}
+                            className="mt-1 px-3 py-2 text-sm rounded-md border border-gray-600 text-gray-200 hover:bg-gray-500/20"
+                        >
+                            Set Storage Path
+                        </button>
+                    </div>
+                </div>
 
-            </div>
-
-            {/* Profile Picture Section (Placeholder) */}
-            <div className="p-6 bg-gray-900 rounded-xl border border-gray-700">
-                <h2 className="text-2xl font-semibold text-white mb-4">Profile Picture</h2>
-                <p className="text-gray-400 mb-4">
-                    Feature to upload or select a profile picture will be available here.
-                </p>
-                <button
-                    className="modern-button opacity-50 cursor-not-allowed text-white font-bold py-2 px-4 rounded-lg shadow-md"
-                    disabled
-                >
-                    Upload Picture (Coming Soon)
-                </button>
+                {/* Profile Picture Row (Placeholder) */}
+                <div className="px-4 py-4 hover:bg-gray-500/10 rounded-md transition-colors">
+                    <div className="flex flex-col items-start gap-2">
+                        <div className="text-base font-medium text-gray-200">Profile Picture</div>
+                        <p className="text-gray-400 text-sm min-w-[280px] sm:min-w-[360px] w-full sm:w-auto text-left">Feature to upload or select a profile picture will be available here.</p>
+                        <button
+                            className="mt-1 px-3 py-2 text-sm rounded-md border border-gray-700 text-gray-500 cursor-not-allowed min-w-[180px] text-left"
+                            disabled
+                        >
+                            Upload Picture (Coming Soon)
+                        </button>
+                    </div>
+                </div>
             </div>
         </div>
     );
